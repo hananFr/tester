@@ -81,7 +81,7 @@ function resetWeaponsFile() {
     fs.copyFileSync(SOURCE_WEAPONS_FILE, WEAPONS_FILE);
 }
 
-function readPythonFiles(dir = PROJECT_DIR) {
+function readAllPythonFiles(dir = PROJECT_DIR) {
     const files = [];
 
     if (!fs.existsSync(dir)) {
@@ -95,7 +95,7 @@ function readPythonFiles(dir = PROJECT_DIR) {
 
         const fullPath = path.join(dir, entry.name);
         if (entry.isDirectory()) {
-            files.push(...readPythonFiles(fullPath));
+            files.push(...readAllPythonFiles(fullPath));
         } else if (entry.isFile() && entry.name.endsWith('.py')) {
             files.push({
                 path: fullPath,
@@ -105,6 +105,83 @@ function readPythonFiles(dir = PROJECT_DIR) {
     }
 
     return files;
+}
+
+function resolveLocalModulePath(moduleName, fromFilePath) {
+    const moduleParts = moduleName.split('.').filter(Boolean);
+
+    if (!moduleParts.length) {
+        return null;
+    }
+
+    const candidates = [
+        path.join(PROJECT_DIR, ...moduleParts) + '.py',
+        path.join(PROJECT_DIR, ...moduleParts, '__init__.py'),
+        path.join(path.dirname(fromFilePath), ...moduleParts) + '.py',
+        path.join(path.dirname(fromFilePath), ...moduleParts, '__init__.py')
+    ];
+
+    return candidates.find((candidate) => candidate.startsWith(PROJECT_DIR) && fs.existsSync(candidate)) || null;
+}
+
+function findLocalImports(file) {
+    const imports = [];
+    const fromImportRegex = /^\s*from\s+([a-zA-Z_][\w.]*)\s+import\s+/gm;
+    const importRegex = /^\s*import\s+([a-zA-Z_][\w.]*(?:\s*,\s*[a-zA-Z_][\w.]*)*)/gm;
+    let match;
+
+    while ((match = fromImportRegex.exec(file.content)) !== null) {
+        imports.push(match[1]);
+    }
+
+    while ((match = importRegex.exec(file.content)) !== null) {
+        for (const moduleName of match[1].split(',').map((name) => name.trim())) {
+            imports.push(moduleName.split(/\s+as\s+/)[0]);
+        }
+    }
+
+    return imports
+        .map((moduleName) => resolveLocalModulePath(moduleName, file.path))
+        .filter(Boolean);
+}
+
+function readPythonFiles() {
+    const allFiles = readAllPythonFiles();
+    const fileByPath = new Map(allFiles.map((file) => [file.path, file]));
+    const entryFiles = allFiles.filter((file) => (
+        /\bFastAPI\s*\(/.test(file.content) ||
+        /@\w+\.(get|post|put|delete|patch)\s*\(/.test(file.content)
+    ));
+
+    if (!entryFiles.length) {
+        return allFiles;
+    }
+
+    const reachablePaths = new Set();
+    const stack = entryFiles.map((file) => file.path);
+
+    while (stack.length) {
+        const filePath = stack.pop();
+
+        if (reachablePaths.has(filePath)) {
+            continue;
+        }
+
+        const file = fileByPath.get(filePath);
+        if (!file) {
+            continue;
+        }
+
+        reachablePaths.add(filePath);
+
+        for (const importedPath of findLocalImports(file)) {
+            if (!reachablePaths.has(importedPath)) {
+                stack.push(importedPath);
+            }
+        }
+    }
+
+    return allFiles.filter((file) => reachablePaths.has(file.path));
 }
 
 function input(prompt = '') {
@@ -508,7 +585,7 @@ async function gradeCodeRequirements(grades) {
     }
 
     const usesHttpException = /HTTPException/.test(allPythonCode);
-    const importsHttpException = /from\s+fastapi\s+import[\s\S]*HTTPException|fastapi\.HTTPException/.test(allPythonCode);
+    const importsHttpException = /from\s+fastapi\s+import[\s\S]*(HTTPException|\*)|fastapi\.HTTPException/.test(allPythonCode);
     const returnsErrorObject = /return\s+[\{\(]\s*["']error["']/.test(allPythonCode);
     grades.http_exception_evidence = {
         uses_http_exception: usesHttpException,
@@ -699,9 +776,10 @@ async function gradePostWeapon(grades) {
         const expectedId = maxId(before) + 1;
         resetWeaponsFile();
         const response = await http.post('/weapons', weapon);
-        resetWeaponsFile();
         const after = await http.get('/weapons');
+        const fileAfter = readWeaponsFile();
         const created = after.find((item) => item.id === expectedId);
+        const createdInFile = fileAfter.find((item) => item.id === expectedId);
         const requestSucceeded = response !== undefined;
         let validPostPassed = false;
 
@@ -719,10 +797,10 @@ async function gradePostWeapon(grades) {
             });
         }
 
-        if (validPostPassed && requestSucceeded && created && containsWeapon(after, created)) {
+        if (validPostPassed && requestSucceeded && createdInFile && containsWeapon(fileAfter, created)) {
             grades['POST /weapons'] += 4;
         } else if (validPostPassed) {
-            addFailure(grades, 'POST /weapons', 'valid POST is visible through API', {method: 'GET', route: '/weapons'}, 'Created weapon was not visible through GET /weapons');
+            addFailure(grades, 'POST /weapons', 'valid POST is saved to weapons.json', {method: 'file read', route: WEAPONS_FILE}, 'Created weapon was not saved to weapons.json');
         }
     } catch (error) {
         addFailure(grades, 'POST /weapons', 'valid POST creates weapon with server id', {method: 'POST', route: '/weapons', body: weapon}, 'Request failed', errorDetails(error));
@@ -743,9 +821,10 @@ async function gradePutWeapon(grades) {
 
         resetWeaponsFile();
         const response = await http.put(`/weapons/${target.id}`, update);
-        resetWeaponsFile();
         const after = await http.get('/weapons');
+        const fileAfter = readWeaponsFile();
         const updated = after.find((weapon) => weapon.id === target.id);
+        const fileUpdated = fileAfter.find((weapon) => weapon.id === target.id);
         const requestSucceeded = response !== undefined;
         let validUpdatePassed = false;
 
@@ -764,12 +843,12 @@ async function gradePutWeapon(grades) {
 
         const otherItemsUnchanged = before
             .filter((weapon) => weapon.id !== target.id)
-            .every((weapon) => sameJson(weapon, after.find((item) => item.id === weapon.id)));
+            .every((weapon) => sameJson(weapon, fileAfter.find((item) => item.id === weapon.id)));
 
-        if (validUpdatePassed && otherItemsUnchanged && sameJson(after.find((weapon) => weapon.id === target.id), updated)) {
+        if (validUpdatePassed && otherItemsUnchanged && sameJson(fileUpdated, updated)) {
             grades['PUT /weapons/{id}'] += 4;
         } else if (validUpdatePassed) {
-            addFailure(grades, 'PUT /weapons/{id}', 'valid PUT only changes target and is visible through API', {method: 'GET', route: '/weapons'}, 'Other items changed or update was not visible through GET /weapons');
+            addFailure(grades, 'PUT /weapons/{id}', 'valid PUT only changes target in weapons.json', {method: 'file read', route: WEAPONS_FILE}, 'Other items changed or update was not saved to weapons.json');
         }
     } catch (error) {
         addFailure(grades, 'PUT /weapons/{id}', 'valid PUT updates existing weapon', {method: 'PUT', route: '/weapons/{existing_id}'}, 'Request failed', errorDetails(error));
@@ -791,8 +870,8 @@ async function gradeDeleteWeapon(grades) {
         deletedId = target.id;
         resetWeaponsFile();
         await http.delete(`/weapons/${target.id}`);
-        resetWeaponsFile();
         const after = await http.get('/weapons');
+        const fileAfter = readWeaponsFile();
         let validDeletePassed = false;
 
         if (after.length === before.length - 1 && !after.some((weapon) => weapon.id === target.id)) {
@@ -804,12 +883,12 @@ async function gradeDeleteWeapon(grades) {
 
         const onlyTargetDeleted = before
             .filter((weapon) => weapon.id !== target.id)
-            .every((weapon) => sameJson(weapon, after.find((item) => item.id === weapon.id)));
+            .every((weapon) => sameJson(weapon, fileAfter.find((item) => item.id === weapon.id)));
 
-        if (validDeletePassed && onlyTargetDeleted && !after.some((weapon) => weapon.id === target.id)) {
+        if (validDeletePassed && onlyTargetDeleted && !fileAfter.some((weapon) => weapon.id === target.id)) {
             grades['DELETE /weapons/{id}'] += 4;
         } else if (validDeletePassed) {
-            addFailure(grades, 'DELETE /weapons/{id}', 'valid DELETE removes only target and is visible through API', {method: 'GET', route: '/weapons'}, 'Other items changed or delete was not visible through GET /weapons');
+            addFailure(grades, 'DELETE /weapons/{id}', 'valid DELETE removes only target from weapons.json', {method: 'file read', route: WEAPONS_FILE}, 'Other items changed or delete was not saved to weapons.json');
         }
     } catch (error) {
         addFailure(grades, 'DELETE /weapons/{id}', 'valid DELETE removes existing weapon', {method: 'DELETE', route: deletedId ? `/weapons/${deletedId}` : '/weapons/{existing_id}'}, 'Request failed', errorDetails(error));
@@ -911,8 +990,8 @@ async function gradeDeleteByCondition(grades) {
 
         resetWeaponsFile();
         await http.delete(`/weapons/by-condition?condition=${condition}`);
-        resetWeaponsFile();
         const after = await http.get('/weapons');
+        const fileAfter = readWeaponsFile();
         let validDeleteByConditionPassed = false;
 
         if (expectedDeletedCount > 0 && sameJson(after, expectedRemaining)) {
@@ -924,10 +1003,10 @@ async function gradeDeleteByCondition(grades) {
             });
         }
 
-        if (validDeleteByConditionPassed && !after.some((weapon) => weapon.condition === condition) && sameJson(after, expectedRemaining)) {
+        if (validDeleteByConditionPassed && !fileAfter.some((weapon) => weapon.condition === condition) && sameJson(fileAfter, expectedRemaining)) {
             grades['DELETE /weapons/by-condition'] += 3;
         } else if (validDeleteByConditionPassed) {
-            addFailure(grades, 'DELETE /weapons/by-condition', 'valid DELETE by condition removes all matching weapons through API', {method: 'GET', route: '/weapons'}, 'Some matching weapons remained in API data');
+            addFailure(grades, 'DELETE /weapons/by-condition', 'valid DELETE by condition removes all matching weapons from weapons.json', {method: 'file read', route: WEAPONS_FILE}, 'Some matching weapons remained in weapons.json');
         }
     } catch (error) {
         addFailure(grades, 'DELETE /weapons/by-condition', 'valid DELETE by condition removes matching weapons', {method: 'DELETE', route: `/weapons/by-condition?condition=${condition}`}, 'Request failed', errorDetails(error));
