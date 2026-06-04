@@ -17,6 +17,20 @@ uvicorn main:app --reload
 
 אם קובץ השרת של התלמיד לא נקרא `main.py`, יש להתאים את הפקודה לשם הקובץ והאובייקט `app`.
 
+אם רוצים שגם הבודק יבדוק פלט לוגים שנכתב בזמן הריצה, מומלץ להריץ את השרת עם הפניה לקובץ:
+
+```bash
+uvicorn main:app --reload > server.log 2>&1
+```
+
+ואז להריץ את הבודק עם:
+
+```bash
+SERVER_LOG_FILE=server.log node index.js
+```
+
+הבדיקה הזו לא מחליפה את סריקת הקוד. כדי לקבל ניקוד על logger עדיין צריך שימוש ב־`logging` בקוד Python, אבל קובץ הלוג עוזר לזהות מקרים שבהם הלוגים באמת נכתבים בזמן בקשות.
+
 ## מאיפה מריצים
 
 הדרך המומלצת: להעתיק את `index.js`, `package.json`, `weapons.json` ו־`weapons.source.json` לתיקיית הפרויקט של התלמיד, ואז להריץ משם:
@@ -44,6 +58,12 @@ STUDENT_PROJECT_DIR=/path/to/student/project node index.js
 
 ```bash
 STUDENT_PROJECT_DIR=/path/to/student/project WEAPONS_SOURCE_FILE=/path/to/weapons.source.json node index.js
+```
+
+אפשר לשלב גם קובץ לוג:
+
+```bash
+STUDENT_PROJECT_DIR=/path/to/student/project SERVER_LOG_FILE=/path/to/student/project/server.log node index.js
 ```
 
 חשוב: שרת התלמיד חייב להשתמש באותו `weapons.json` שהסקריפט קורא ממנו. לכן הכי פשוט ובטוח להריץ את הסקריפט מתוך תיקיית הפרויקט של התלמיד.
@@ -168,7 +188,7 @@ Student Name
 }
 ```
 
-אם בדיקה נכשלת, יופיעו פרטים בתוך `failures`. כל כשל כולל את שם האנדפוינט, שם הבדיקה, הבקשה המדויקת שנשלחה, והסיבה לכשל.
+אם בדיקה נכשלת, יופיעו פרטים בתוך `failures`. כל כשל כולל את שם האנדפוינט או סעיף הקוד, שם הבדיקה, הבקשה או הסריקה שבוצעה, והסיבה לכשל.
 
 ## הערות חשובות לבודק
 

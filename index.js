@@ -44,6 +44,7 @@ const SOURCE_WEAPONS_FILE = process.env.WEAPONS_SOURCE_FILE
     : path.join(__dirname, 'weapons.source.json');
 const WEAPONS_FILE = path.join(PROJECT_DIR, 'weapons.json');
 const GRADES_FILE = path.join(__dirname, 'grades.json');
+const SERVER_LOG_FILE = process.env.SERVER_LOG_FILE ? path.resolve(process.env.SERVER_LOG_FILE) : null;
 const REQUIRED_FIELDS = ['type', 'model', 'ammo_type', 'condition'];
 const RUN_ID = Date.now();
 const SKIPPED_DIRS = new Set(['.git', '.venv', 'venv', 'env', '__pycache__', 'node_modules']);
@@ -65,6 +66,7 @@ const codeRequirements = [
     'logger_usage',
     'http_exception_usage'
 ];
+const LOG_METHODS = 'debug|info|warning|warn|error|exception|critical';
 
 function readWeaponsFile() {
     return JSON.parse(fs.readFileSync(WEAPONS_FILE, 'utf8'));
@@ -177,6 +179,48 @@ function errorDetails(error) {
     };
 }
 
+function snapshotServerLog() {
+    if (!SERVER_LOG_FILE || !fs.existsSync(SERVER_LOG_FILE)) {
+        return null;
+    }
+
+    const stats = fs.statSync(SERVER_LOG_FILE);
+    return {
+        path: SERVER_LOG_FILE,
+        size: stats.size
+    };
+}
+
+function readNewServerLogText(snapshot) {
+    if (!snapshot || !fs.existsSync(snapshot.path)) {
+        return '';
+    }
+
+    const current = fs.readFileSync(snapshot.path, 'utf8');
+    return current.slice(snapshot.size);
+}
+
+function getLoggerEvidence(allPythonCode) {
+    const importsLogging = /import\s+logging|from\s+logging\s+import/.test(allPythonCode);
+    const configuresLogging = /logging\.basicConfig|logging\.getLogger|getLogger\s*\(/.test(allPythonCode);
+    const createsLogger = /\b\w*logger\w*\s*=|\blog\s*=|logging\.getLogger|getLogger\s*\(/i.test(allPythonCode);
+    const directLoggingCall = new RegExp(`\\blogging\\.(${LOG_METHODS})\\s*\\(`).test(allPythonCode);
+    const importedLoggingCall = new RegExp(`from\\s+logging\\s+import[\\s\\S]*\\b(${LOG_METHODS})\\b[\\s\\S]*\\b(${LOG_METHODS})\\s*\\(`).test(allPythonCode);
+    const anyLoggerLikeCall = new RegExp(`\\.(${LOG_METHODS})\\s*\\(`).test(allPythonCode);
+    const logsEvents = directLoggingCall || importedLoggingCall || (importsLogging && anyLoggerLikeCall);
+
+    return {
+        imports_logging: importsLogging,
+        configures_logging: configuresLogging,
+        creates_logger: createsLogger,
+        direct_logging_call: directLoggingCall,
+        imported_logging_call: importedLoggingCall,
+        logger_like_call: anyLoggerLikeCall,
+        logs_events: logsEvents,
+        static_passed: importsLogging && logsEvents
+    };
+}
+
 async function request(method, route, body) {
     const options = {
         method,
@@ -222,6 +266,8 @@ function createGradeSheet(studentName) {
         project_dir: PROJECT_DIR,
         weapons_file: WEAPONS_FILE,
         source_weapons_file: SOURCE_WEAPONS_FILE,
+        server_log_file: SERVER_LOG_FILE,
+        logger_evidence: null,
         failures: []
     };
 
@@ -237,6 +283,7 @@ async function gradeCodeRequirements(grades) {
         await http.get('/openapi.json');
         grades.code_requirements.fastapi_server_runs = 5;
     } catch (error) {
+        addFailure(grades, 'code_requirements', 'FastAPI server runs', {method: 'GET', route: '/openapi.json'}, 'FastAPI server did not respond on localhost:8000', errorDetails(error));
         console.log('FastAPI server check failed:', error.message);
     }
 
@@ -248,6 +295,9 @@ async function gradeCodeRequirements(grades) {
         grades.code_requirements.fastapi_server_runs = 5;
     } else if (usesFastApi) {
         grades.code_requirements.fastapi_server_runs = 3;
+        addFailure(grades, 'code_requirements', 'FastAPI server runs', {method: 'GET', route: '/openapi.json'}, 'FastAPI code was found, but the server did not respond');
+    } else {
+        addFailure(grades, 'code_requirements', 'FastAPI server runs', {method: 'static scan', route: PROJECT_DIR}, 'No FastAPI usage was found in Python files');
     }
 
     const mentionsWeaponsJson = /weapons\.json/.test(allPythonCode);
@@ -258,12 +308,20 @@ async function gradeCodeRequirements(grades) {
 
     if (mentionsWeaponsJson && usesJsonModule && readsJson && writesJson && opensFile) {
         grades.code_requirements.json_file_database = 5;
+    } else {
+        addFailure(grades, 'code_requirements', 'JSON file database usage', {method: 'static scan', route: PROJECT_DIR}, 'Expected weapons.json with json load/dump and file open usage', {
+            mentions_weapons_json: mentionsWeaponsJson,
+            imports_json: usesJsonModule,
+            reads_json: readsJson,
+            writes_json: writesJson,
+            opens_file: opensFile
+        });
     }
 
-    const usesLogger = /import\s+logging|from\s+logging\s+import|logging\.getLogger|logger\s*=|logger\.(info|error|warning|debug|exception)/.test(allPythonCode);
-    const logsEvents = /logger\.(info|error|warning|debug|exception)|logging\.(info|error|warning|debug|exception)/.test(allPythonCode);
+    const loggerEvidence = getLoggerEvidence(allPythonCode);
+    grades.logger_evidence = loggerEvidence;
 
-    if (usesLogger && logsEvents) {
+    if (loggerEvidence.static_passed) {
         grades.code_requirements.logger_usage = 5;
     }
 
@@ -275,7 +333,37 @@ async function gradeCodeRequirements(grades) {
         grades.code_requirements.http_exception_usage = 5;
     } else if (usesHttpException && importsHttpException) {
         grades.code_requirements.http_exception_usage = 3;
+        addFailure(grades, 'code_requirements', 'HTTPException usage', {method: 'static scan', route: PROJECT_DIR}, 'HTTPException was found, but return {"error": ...} was also found');
+    } else {
+        addFailure(grades, 'code_requirements', 'HTTPException usage', {method: 'static scan', route: PROJECT_DIR}, 'Expected HTTPException import and usage for HTTP errors', {
+            uses_http_exception: usesHttpException,
+            imports_http_exception: importsHttpException
+        });
     }
+}
+
+function gradeRuntimeLogger(grades, logSnapshotBefore) {
+    if (grades.code_requirements.logger_usage === 5) {
+        return;
+    }
+
+    const newLogText = readNewServerLogText(logSnapshotBefore);
+    const logGrew = newLogText.trim().length > 0;
+    const hasPythonLoggingImport = grades.logger_evidence?.imports_logging;
+
+    if (hasPythonLoggingImport && logGrew) {
+        grades.code_requirements.logger_usage = 5;
+        grades.logger_evidence.runtime_log_grew = true;
+        grades.logger_evidence.runtime_log_sample = newLogText.slice(-500);
+        return;
+    }
+
+    addFailure(grades, 'code_requirements', 'logger usage', {method: 'static scan + optional server log', route: PROJECT_DIR}, 'Expected Python logging import and at least one log call. To check terminal logs, run server output into SERVER_LOG_FILE.', {
+        ...grades.logger_evidence,
+        server_log_file: SERVER_LOG_FILE,
+        runtime_log_checked: Boolean(logSnapshotBefore),
+        runtime_log_grew: logGrew
+    });
 }
 
 async function gradeGetWeapons(grades) {
@@ -721,6 +809,7 @@ async function gradeDeleteByCondition(grades) {
 async function testFastApi() {
     const studentName = input('Student Name \n');
     resetWeaponsFile();
+    const logSnapshotBefore = snapshotServerLog();
     const grades = createGradeSheet(studentName);
 
     await gradeCodeRequirements(grades);
@@ -733,6 +822,7 @@ async function testFastApi() {
     await gradeCombatReady(grades);
     await gradeSummaryByType(grades);
     await gradeDeleteByCondition(grades);
+    gradeRuntimeLogger(grades, logSnapshotBefore);
 
     grades.endpoint_points = endpoints.reduce((sum, endpoint) => sum + grades[endpoint], 0);
     grades.code_quality_points = codeRequirements.reduce((sum, requirement) => {
