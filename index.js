@@ -812,43 +812,95 @@ async function gradePutWeapon(grades) {
     try {
         const before = await getApiWeaponsForExpectedData();
         const target = before.find((weapon) => weapon.condition !== 'critical') || before[0];
-        const update = {
-            type: target.type,
-            model: `PUT-GRADE-UPDATED-${RUN_ID}`,
-            ammo_type: target.ammo_type,
-            condition: 'critical'
-        };
+        const candidates = [
+            {
+                mode: 'full body',
+                body: {
+                    type: target.type,
+                    model: `PUT-GRADE-FULL-${RUN_ID}`,
+                    ammo_type: target.ammo_type,
+                    condition: 'critical'
+                },
+                expected: {
+                    ...target,
+                    model: `PUT-GRADE-FULL-${RUN_ID}`,
+                    condition: 'critical'
+                }
+            },
+            {
+                mode: 'partial body',
+                body: {
+                    model: `PUT-GRADE-PARTIAL-${RUN_ID}`,
+                    condition: 'critical'
+                },
+                expected: {
+                    ...target,
+                    model: `PUT-GRADE-PARTIAL-${RUN_ID}`,
+                    condition: 'critical'
+                }
+            }
+        ];
+        const attempts = [];
+        let successfulAttempt = null;
 
-        resetWeaponsFile();
-        const response = await http.put(`/weapons/${target.id}`, update);
-        const after = await http.get('/weapons');
-        const fileAfter = readWeaponsFile();
-        const updated = after.find((weapon) => weapon.id === target.id);
-        const fileUpdated = fileAfter.find((weapon) => weapon.id === target.id);
-        const requestSucceeded = response !== undefined;
-        let validUpdatePassed = false;
+        for (const candidate of candidates) {
+            try {
+                resetWeaponsFile();
+                const response = await http.put(`/weapons/${target.id}`, candidate.body);
+                const after = await http.get('/weapons');
+                const fileAfter = readWeaponsFile();
+                const updated = after.find((weapon) => weapon.id === target.id);
+                const fileUpdated = fileAfter.find((weapon) => weapon.id === target.id);
+                const validResponse =
+                    response !== undefined &&
+                    updated &&
+                    after.length === before.length &&
+                    sameJson(updated, candidate.expected);
 
-        if (
-            updated &&
-            requestSucceeded &&
-            after.length === before.length &&
-            updated.model === update.model &&
-            updated.condition === update.condition
-        ) {
+                attempts.push({
+                    mode: candidate.mode,
+                    body: candidate.body,
+                    valid_response: Boolean(validResponse)
+                });
+
+                if (validResponse) {
+                    successfulAttempt = {
+                        ...candidate,
+                        after,
+                        fileAfter,
+                        updated,
+                        fileUpdated
+                    };
+                    break;
+                }
+            } catch (error) {
+                attempts.push({
+                    mode: candidate.mode,
+                    body: candidate.body,
+                    ...errorDetails(error)
+                });
+            }
+        }
+
+        if (successfulAttempt) {
             grades['PUT /weapons/{id}'] += 5;
-            validUpdatePassed = true;
         } else {
-            addFailure(grades, 'PUT /weapons/{id}', 'valid PUT updates existing weapon', {method: 'PUT', route: `/weapons/${target.id}`, body: update}, 'Weapon was not updated as expected or a new item was created');
+            addFailure(grades, 'PUT /weapons/{id}', 'valid PUT updates existing weapon', {method: 'PUT', route: `/weapons/${target.id}`, body: candidates.map((candidate) => candidate.body)}, 'Weapon was not updated as expected with full or partial body', {
+                attempts
+            });
+            return;
         }
 
         const otherItemsUnchanged = before
             .filter((weapon) => weapon.id !== target.id)
-            .every((weapon) => sameJson(weapon, fileAfter.find((item) => item.id === weapon.id)));
+            .every((weapon) => sameJson(weapon, successfulAttempt.fileAfter.find((item) => item.id === weapon.id)));
 
-        if (validUpdatePassed && otherItemsUnchanged && sameJson(fileUpdated, updated)) {
+        if (otherItemsUnchanged && sameJson(successfulAttempt.fileUpdated, successfulAttempt.updated)) {
             grades['PUT /weapons/{id}'] += 4;
-        } else if (validUpdatePassed) {
-            addFailure(grades, 'PUT /weapons/{id}', 'valid PUT only changes target in weapons.json', {method: 'file read', route: WEAPONS_FILE}, 'Other items changed or update was not saved to weapons.json');
+        } else {
+            addFailure(grades, 'PUT /weapons/{id}', 'valid PUT only changes target in weapons.json', {method: 'file read', route: WEAPONS_FILE}, 'Other items changed or update was not saved to weapons.json', {
+                accepted_mode: successfulAttempt.mode
+            });
         }
     } catch (error) {
         addFailure(grades, 'PUT /weapons/{id}', 'valid PUT updates existing weapon', {method: 'PUT', route: '/weapons/{existing_id}'}, 'Request failed', errorDetails(error));
