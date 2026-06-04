@@ -137,11 +137,22 @@ function writeGradesFile(result) {
         .toLowerCase()
         .replace(/[^a-z0-9\u0590-\u05ff]+/gi, '-')
         .replace(/^-+|-+$/g, '') || 'student';
-    const timestamp = new Date(RUN_ID).toISOString().replace(/[:.]/g, '-');
-    const studentGradesFile = path.join(GRADES_DIR, `${studentSlug}-${timestamp}.json`);
-    const studentReportFile = path.join(GRADES_DIR, `${studentSlug}-${timestamp}.md`);
+    const studentGradesFile = path.join(GRADES_DIR, `${studentSlug}.json`);
+    const studentReportFile = path.join(GRADES_DIR, `${studentSlug}.md`);
     const summaryFile = path.join(GRADES_DIR, 'summary.md');
 
+    for (const file of fs.readdirSync(GRADES_DIR)) {
+        const isSameStudentResult =
+            file === `${studentSlug}.json` ||
+            file === `${studentSlug}.md` ||
+            file.startsWith(`${studentSlug}-`);
+
+        if (isSameStudentResult && (file.endsWith('.json') || file.endsWith('.md'))) {
+            fs.rmSync(path.join(GRADES_DIR, file), {force: true});
+        }
+    }
+
+    result.checked_at = new Date(RUN_ID).toISOString();
     result.grades_file = studentGradesFile;
     result.report_file = studentReportFile;
     result.latest_grades_file = GRADES_FILE;
@@ -180,6 +191,12 @@ function buildStudentReport(result) {
         ['HTTPException usage', result.code_requirements.http_exception_usage, 5]
     ];
 
+    const validationRows = (result.validation_results || []).map((validation) => [
+        validation.test,
+        validation.endpoint,
+        validation.deducted ? -1 : 0
+    ]);
+
     const failures = result.failures?.length
         ? result.failures.map((failure, index) => {
             return [
@@ -210,6 +227,11 @@ function buildStudentReport(result) {
         '## ניקוד איכות קוד',
         '',
         markdownTable(['סעיף', 'ניקוד', 'מקסימום'], codeRows),
+        '## בדיקות ולידציה',
+        '',
+        validationRows.length
+            ? markdownTable(['מקרה', 'אנדפוינט', 'הורדה'], validationRows)
+            : 'לא הורצו בדיקות ולידציה.',
         '## פירוט כשלים',
         '',
         failures,
@@ -232,7 +254,7 @@ function readGradeResults() {
                 return null;
             }
         })
-        .filter(Boolean)
+        .filter((result) => Boolean(result?.name))
         .sort((a, b) => String(a.name).localeCompare(String(b.name)));
 }
 
@@ -385,10 +407,18 @@ async function request(method, route, body) {
 
     const res = await fetch(`${BASE_URL}${route}`, options);
     const text = await res.text();
-    const data = text ? JSON.parse(text) : null;
+    let data = null;
+
+    if (text) {
+        try {
+            data = JSON.parse(text);
+        } catch (error) {
+            data = text;
+        }
+    }
 
     if (!res.ok) {
-        const message = data?.detail || data?.message || data?.error || res.statusText;
+        const message = data?.detail || data?.message || data?.error || data || res.statusText;
         throw new HttpError(message, res.status, data);
     }
 
@@ -418,6 +448,8 @@ function createGradeSheet(studentName) {
         source_weapons_file: SOURCE_WEAPONS_FILE,
         server_log_file: SERVER_LOG_FILE,
         logger_evidence: null,
+        http_exception_evidence: null,
+        validation_results: [],
         failures: []
     };
 
@@ -478,6 +510,11 @@ async function gradeCodeRequirements(grades) {
     const usesHttpException = /HTTPException/.test(allPythonCode);
     const importsHttpException = /from\s+fastapi\s+import[\s\S]*HTTPException|fastapi\.HTTPException/.test(allPythonCode);
     const returnsErrorObject = /return\s+[\{\(]\s*["']error["']/.test(allPythonCode);
+    grades.http_exception_evidence = {
+        uses_http_exception: usesHttpException,
+        imports_http_exception: importsHttpException,
+        returns_error_object: returnsErrorObject
+    };
 
     if (usesHttpException && importsHttpException && !returnsErrorObject) {
         grades.code_requirements.http_exception_usage = 5;
@@ -516,20 +553,108 @@ function gradeRuntimeLogger(grades, logSnapshotBefore) {
     });
 }
 
+function deductEndpointPoint(grades, endpoint, reason, requestInfo, details = {}) {
+    const before = grades[endpoint] || 0;
+    grades[endpoint] = Math.max(0, before - 1);
+
+    addFailure(grades, endpoint, 'invalid input validation', requestInfo, reason, {
+        deducted: before > grades[endpoint],
+        score_before: before,
+        score_after: grades[endpoint],
+        ...details
+    });
+
+    return before > grades[endpoint];
+}
+
+function addValidationResult(grades, endpoint, test, deducted, details = {}) {
+    grades.validation_results.push({
+        endpoint,
+        test,
+        deducted,
+        ...details
+    });
+}
+
+function isExpectedValidationError(error, statuses = [400, 404, 422]) {
+    return error instanceof HttpError && statuses.includes(error.status);
+}
+
+async function gradeValidationCases(grades) {
+    try {
+        const body = {type: 'rifle', ammo_type: '5.56mm', condition: 'new'};
+        resetWeaponsFile();
+        await http.post('/weapons', body);
+        const requestInfo = {method: 'POST', route: '/weapons', body};
+        const deducted = deductEndpointPoint(grades, 'POST /weapons', 'Invalid missing required field request succeeded instead of returning an error', requestInfo);
+        addValidationResult(grades, 'POST /weapons', 'POST missing required field should error', deducted, {status: 'succeeded'});
+    } catch (error) {
+        const accepted = isExpectedValidationError(error, [400, 422]);
+        addValidationResult(grades, 'POST /weapons', 'POST missing required field should error', false, {
+            accepted,
+            ...errorDetails(error)
+        });
+
+        if (!accepted) {
+            addFailure(grades, 'POST /weapons', 'invalid input validation', {method: 'POST', route: '/weapons'}, 'Missing required field returned an unexpected error status', errorDetails(error));
+        }
+    }
+
+    const extraFieldBody = {
+        type: 'rifle',
+        model: `EXTRA-FIELD-${RUN_ID}`,
+        ammo_type: '5.56mm',
+        condition: 'new',
+        forbidden_field: 'should-not-be-saved'
+    };
+
+    try {
+        resetWeaponsFile();
+        await http.post('/weapons', extraFieldBody);
+        const after = await http.get('/weapons');
+        const created = Array.isArray(after)
+            ? after.find((weapon) => weapon.model === extraFieldBody.model)
+            : null;
+        const accepted = Boolean(created && created.forbidden_field === undefined);
+        const deducted = accepted
+            ? false
+            : deductEndpointPoint(grades, 'POST /weapons', 'Extra field was accepted and saved instead of being rejected or ignored', {method: 'POST', route: '/weapons', body: extraFieldBody});
+
+        addValidationResult(grades, 'POST /weapons', 'POST extra field should error or be ignored', deducted, {
+            accepted,
+            behavior: 'ignored_extra_field',
+            created_without_extra_field: accepted
+        });
+    } catch (error) {
+        const accepted = isExpectedValidationError(error, [400, 422]);
+        addValidationResult(grades, 'POST /weapons', 'POST extra field should error or be ignored', false, {
+            accepted,
+            behavior: 'error_for_extra_field',
+            ...errorDetails(error)
+        });
+
+        if (!accepted) {
+            addFailure(grades, 'POST /weapons', 'invalid input validation', {method: 'POST', route: '/weapons', body: extraFieldBody}, 'Extra field returned an unexpected error status', errorDetails(error));
+        }
+    }
+}
+
 async function gradeGetWeapons(grades) {
     try {
         resetWeaponsFile();
         const response = await http.get('/weapons');
+        const isList = Array.isArray(response);
+        const containsCompleteWeapons = isList && response.length > 0 && response.every(isWeaponLike);
 
-        if (Array.isArray(response)) {
-            grades['/weapons'] += 5;
-        } else {
+        if (isList && containsCompleteWeapons) {
+            grades['/weapons'] += 9;
+        }
+
+        if (!isList) {
             addFailure(grades, '/weapons', 'valid response returns a list', {method: 'GET', route: '/weapons'}, 'Response was not an array');
         }
 
-        if (Array.isArray(response) && response.length > 0 && response.every(isWeaponLike)) {
-            grades['/weapons'] += 4;
-        } else {
+        if (!containsCompleteWeapons) {
             addFailure(grades, '/weapons', 'valid response contains complete weapon objects', {method: 'GET', route: '/weapons'}, 'Response did not contain complete weapon objects');
         }
     } catch (error) {
@@ -578,6 +703,7 @@ async function gradePostWeapon(grades) {
         const after = await http.get('/weapons');
         const created = after.find((item) => item.id === expectedId);
         const requestSucceeded = response !== undefined;
+        let validPostPassed = false;
 
         if (
             created &&
@@ -586,15 +712,16 @@ async function gradePostWeapon(grades) {
             REQUIRED_FIELDS.every((field) => created[field] === weapon[field])
         ) {
             grades['POST /weapons'] += 5;
+            validPostPassed = true;
         } else {
             addFailure(grades, 'POST /weapons', 'valid POST creates weapon with server id', {method: 'POST', route: '/weapons', body: weapon}, 'Created weapon was not found in API data with expected id or expected fields', {
                 expected_id: expectedId
             });
         }
 
-        if (requestSucceeded && created && containsWeapon(after, created)) {
+        if (validPostPassed && requestSucceeded && created && containsWeapon(after, created)) {
             grades['POST /weapons'] += 4;
-        } else if (created) {
+        } else if (validPostPassed) {
             addFailure(grades, 'POST /weapons', 'valid POST is visible through API', {method: 'GET', route: '/weapons'}, 'Created weapon was not visible through GET /weapons');
         }
     } catch (error) {
@@ -620,6 +747,7 @@ async function gradePutWeapon(grades) {
         const after = await http.get('/weapons');
         const updated = after.find((weapon) => weapon.id === target.id);
         const requestSucceeded = response !== undefined;
+        let validUpdatePassed = false;
 
         if (
             updated &&
@@ -629,6 +757,7 @@ async function gradePutWeapon(grades) {
             updated.condition === update.condition
         ) {
             grades['PUT /weapons/{id}'] += 5;
+            validUpdatePassed = true;
         } else {
             addFailure(grades, 'PUT /weapons/{id}', 'valid PUT updates existing weapon', {method: 'PUT', route: `/weapons/${target.id}`, body: update}, 'Weapon was not updated as expected or a new item was created');
         }
@@ -637,9 +766,9 @@ async function gradePutWeapon(grades) {
             .filter((weapon) => weapon.id !== target.id)
             .every((weapon) => sameJson(weapon, after.find((item) => item.id === weapon.id)));
 
-        if (updated && otherItemsUnchanged && sameJson(after.find((weapon) => weapon.id === target.id), updated)) {
+        if (validUpdatePassed && otherItemsUnchanged && sameJson(after.find((weapon) => weapon.id === target.id), updated)) {
             grades['PUT /weapons/{id}'] += 4;
-        } else if (updated) {
+        } else if (validUpdatePassed) {
             addFailure(grades, 'PUT /weapons/{id}', 'valid PUT only changes target and is visible through API', {method: 'GET', route: '/weapons'}, 'Other items changed or update was not visible through GET /weapons');
         }
     } catch (error) {
@@ -664,9 +793,11 @@ async function gradeDeleteWeapon(grades) {
         await http.delete(`/weapons/${target.id}`);
         resetWeaponsFile();
         const after = await http.get('/weapons');
+        let validDeletePassed = false;
 
         if (after.length === before.length - 1 && !after.some((weapon) => weapon.id === target.id)) {
             grades['DELETE /weapons/{id}'] += 5;
+            validDeletePassed = true;
         } else {
             addFailure(grades, 'DELETE /weapons/{id}', 'valid DELETE removes existing weapon', {method: 'DELETE', route: `/weapons/${target.id}`}, 'Target weapon was not removed from API data');
         }
@@ -675,9 +806,9 @@ async function gradeDeleteWeapon(grades) {
             .filter((weapon) => weapon.id !== target.id)
             .every((weapon) => sameJson(weapon, after.find((item) => item.id === weapon.id)));
 
-        if (onlyTargetDeleted && !after.some((weapon) => weapon.id === target.id)) {
+        if (validDeletePassed && onlyTargetDeleted && !after.some((weapon) => weapon.id === target.id)) {
             grades['DELETE /weapons/{id}'] += 4;
-        } else {
+        } else if (validDeletePassed) {
             addFailure(grades, 'DELETE /weapons/{id}', 'valid DELETE removes only target and is visible through API', {method: 'GET', route: '/weapons'}, 'Other items changed or delete was not visible through GET /weapons');
         }
     } catch (error) {
@@ -693,9 +824,11 @@ async function gradeByCondition(grades) {
         const expected = weapons.filter((weapon) => weapon.condition === condition);
         resetWeaponsFile();
         const response = await http.get(`/weapons/by-condition?condition=${condition}`);
+        let validConditionPassed = false;
 
         if (sameJson(response, expected)) {
             grades['/weapons/by-condition'] += 5;
+            validConditionPassed = true;
         } else {
             addFailure(grades, '/weapons/by-condition', 'valid condition returns matching weapons', {method: 'GET', route: `/weapons/by-condition?condition=${condition}`}, 'Response did not match weapons with requested condition', {
                 expected_count: expected.length,
@@ -703,9 +836,9 @@ async function gradeByCondition(grades) {
             });
         }
 
-        if (Array.isArray(response) && response.every((weapon) => weapon.condition === condition)) {
+        if (validConditionPassed && Array.isArray(response) && response.every((weapon) => weapon.condition === condition)) {
             grades['/weapons/by-condition'] += 4;
-        } else if (Array.isArray(response)) {
+        } else if (validConditionPassed) {
             addFailure(grades, '/weapons/by-condition', 'all returned weapons have requested condition', {method: 'GET', route: `/weapons/by-condition?condition=${condition}`}, 'Some returned weapons had a different condition');
         }
     } catch (error) {
@@ -721,9 +854,11 @@ async function gradeCombatReady(grades) {
         const expected = weapons.filter((weapon) => weapon.type === type && ['new', 'good'].includes(weapon.condition));
         resetWeaponsFile();
         const response = await http.get(`/weapons/combat-ready?type=${type}`);
+        let validCombatReadyPassed = false;
 
         if (sameJson(response, expected)) {
             grades['/weapons/combat-ready'] += 5;
+            validCombatReadyPassed = true;
         } else {
             addFailure(grades, '/weapons/combat-ready', 'valid type returns only combat-ready weapons', {method: 'GET', route: `/weapons/combat-ready?type=${type}`}, 'Response did not match weapons with requested type and condition new/good', {
                 expected_count: expected.length,
@@ -731,15 +866,15 @@ async function gradeCombatReady(grades) {
             });
         }
 
-        if (Array.isArray(response) && response.every((weapon) => weapon.type === type)) {
+        if (validCombatReadyPassed && Array.isArray(response) && response.every((weapon) => weapon.type === type)) {
             grades['/weapons/combat-ready'] += 2;
-        } else if (Array.isArray(response)) {
+        } else if (validCombatReadyPassed) {
             addFailure(grades, '/weapons/combat-ready', 'all returned weapons have requested type', {method: 'GET', route: `/weapons/combat-ready?type=${type}`}, 'Some returned weapons had a different type');
         }
 
-        if (Array.isArray(response) && response.every((weapon) => ['new', 'good'].includes(weapon.condition))) {
+        if (validCombatReadyPassed && Array.isArray(response) && response.every((weapon) => ['new', 'good'].includes(weapon.condition))) {
             grades['/weapons/combat-ready'] += 2;
-        } else if (Array.isArray(response)) {
+        } else if (validCombatReadyPassed) {
             addFailure(grades, '/weapons/combat-ready', 'all returned weapons are combat ready', {method: 'GET', route: `/weapons/combat-ready?type=${type}`}, 'Some returned weapons were not new/good');
         }
     } catch (error) {
@@ -778,18 +913,20 @@ async function gradeDeleteByCondition(grades) {
         await http.delete(`/weapons/by-condition?condition=${condition}`);
         resetWeaponsFile();
         const after = await http.get('/weapons');
+        let validDeleteByConditionPassed = false;
 
         if (expectedDeletedCount > 0 && sameJson(after, expectedRemaining)) {
             grades['DELETE /weapons/by-condition'] += 5;
+            validDeleteByConditionPassed = true;
         } else {
             addFailure(grades, 'DELETE /weapons/by-condition', 'valid DELETE by condition removes matching weapons', {method: 'DELETE', route: `/weapons/by-condition?condition=${condition}`}, 'API data did not match expected remaining weapons after delete', {
                 expected_deleted_count: expectedDeletedCount
             });
         }
 
-        if (!after.some((weapon) => weapon.condition === condition) && sameJson(after, expectedRemaining)) {
+        if (validDeleteByConditionPassed && !after.some((weapon) => weapon.condition === condition) && sameJson(after, expectedRemaining)) {
             grades['DELETE /weapons/by-condition'] += 3;
-        } else {
+        } else if (validDeleteByConditionPassed) {
             addFailure(grades, 'DELETE /weapons/by-condition', 'valid DELETE by condition removes all matching weapons through API', {method: 'GET', route: '/weapons'}, 'Some matching weapons remained in API data');
         }
     } catch (error) {
@@ -814,6 +951,7 @@ async function testFastApi() {
     await gradeCombatReady(grades);
     await gradeSummaryByType(grades);
     await gradeDeleteByCondition(grades);
+    await gradeValidationCases(grades);
     gradeRuntimeLogger(grades, logSnapshotBefore);
     resetWeaponsFile();
 
