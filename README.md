@@ -158,10 +158,12 @@ Student Name
 
 ## פלט
 
-בסיום כל ריצה נוצרים שני קבצים:
+בסיום כל ריצה נוצרים כמה קבצי פלט:
 
 - `grades.json` - הריצה האחרונה בלבד, לנוחות צפייה מהירה.
-- `grades/<student-name>-<timestamp>.json` - קובץ היסטורי שלא נדרס בהרצות הבאות.
+- `grades/<student-name>-<timestamp>.json` - קובץ JSON היסטורי שלא נדרס בהרצות הבאות.
+- `grades/<student-name>-<timestamp>.md` - דוח קריא לתלמיד: למעלה סיכום בסיסי, למטה פירוט כשלים.
+- `grades/summary.md` - טבלת סיכום מצטברת של כל התלמידים לפי סעיף.
 
 כך אפשר לבדוק תלמידים אחד אחרי השני באותה תיקייה בלי לאבד ציונים קודמים.
 
@@ -182,7 +184,9 @@ Student Name
   "weapons_file": "/path/to/student/project/weapons.json",
   "source_weapons_file": "/path/to/checker/weapons.source.json",
   "grades_file": "/path/to/checker/grades/student-name-2026-06-04T10-00-00-000Z.json",
+  "report_file": "/path/to/checker/grades/student-name-2026-06-04T10-00-00-000Z.md",
   "latest_grades_file": "/path/to/checker/grades.json",
+  "summary_file": "/path/to/checker/grades/summary.md",
   "/weapons": 9,
   "/weapons/{id}": 9,
   "POST /weapons": 9,

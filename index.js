@@ -139,12 +139,139 @@ function writeGradesFile(result) {
         .replace(/^-+|-+$/g, '') || 'student';
     const timestamp = new Date(RUN_ID).toISOString().replace(/[:.]/g, '-');
     const studentGradesFile = path.join(GRADES_DIR, `${studentSlug}-${timestamp}.json`);
+    const studentReportFile = path.join(GRADES_DIR, `${studentSlug}-${timestamp}.md`);
+    const summaryFile = path.join(GRADES_DIR, 'summary.md');
 
     result.grades_file = studentGradesFile;
+    result.report_file = studentReportFile;
     result.latest_grades_file = GRADES_FILE;
+    result.summary_file = summaryFile;
 
     fs.writeFileSync(studentGradesFile, `${JSON.stringify(result, null, 2)}\n`);
+    fs.writeFileSync(studentReportFile, buildStudentReport(result));
     fs.writeFileSync(GRADES_FILE, `${JSON.stringify(result, null, 2)}\n`);
+    writeSummaryFile(summaryFile);
+}
+
+function escapeMarkdown(value) {
+    return String(value ?? '')
+        .replace(/\|/g, '\\|')
+        .replace(/\n/g, '<br>');
+}
+
+function markdownTable(headers, rows) {
+    const headerLine = `| ${headers.map(escapeMarkdown).join(' | ')} |`;
+    const separatorLine = `| ${headers.map(() => '---').join(' | ')} |`;
+    const rowLines = rows.map((row) => `| ${row.map(escapeMarkdown).join(' | ')} |`);
+    return `${[headerLine, separatorLine, ...rowLines].join('\n')}\n`;
+}
+
+function buildStudentReport(result) {
+    const endpointRows = endpoints.map((endpoint) => [
+        endpoint,
+        result[endpoint],
+        endpoint === 'DELETE /weapons/by-condition' ? 8 : 9
+    ]);
+
+    const codeRows = [
+        ['FastAPI server runs', result.code_requirements.fastapi_server_runs, 5],
+        ['JSON file database', result.code_requirements.json_file_database, 5],
+        ['Logger usage', result.code_requirements.logger_usage, 5],
+        ['HTTPException usage', result.code_requirements.http_exception_usage, 5]
+    ];
+
+    const failures = result.failures?.length
+        ? result.failures.map((failure, index) => {
+            return [
+                `### ${index + 1}. ${failure.endpoint} - ${failure.test}`,
+                '',
+                `- בקשה/בדיקה: \`${failure.request?.method || ''} ${failure.request?.route || ''}\``,
+                `- סיבה: ${failure.reason}`,
+                '',
+                '```json',
+                JSON.stringify(failure, null, 2),
+                '```'
+            ].join('\n');
+        }).join('\n\n')
+        : 'אין כשלים מפורטים.';
+
+    return [
+        `# דוח בדיקה - ${result.name}`,
+        '',
+        '## סיכום בסיסי',
+        '',
+        markdownTable(
+            ['שם', 'ציון סופי', 'אנדפוינטים', 'איכות קוד', 'מקסימום'],
+            [[result.name, result.total, result.endpoint_points, result.code_quality_points, result.max_score]]
+        ),
+        '## ניקוד לפי אנדפוינט',
+        '',
+        markdownTable(['סעיף', 'ניקוד', 'מקסימום'], endpointRows),
+        '## ניקוד איכות קוד',
+        '',
+        markdownTable(['סעיף', 'ניקוד', 'מקסימום'], codeRows),
+        '## פירוט כשלים',
+        '',
+        failures,
+        ''
+    ].join('\n');
+}
+
+function readGradeResults() {
+    if (!fs.existsSync(GRADES_DIR)) {
+        return [];
+    }
+
+    return fs.readdirSync(GRADES_DIR)
+        .filter((file) => file.endsWith('.json'))
+        .map((file) => {
+            const fullPath = path.join(GRADES_DIR, file);
+            try {
+                return JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+            } catch (error) {
+                return null;
+            }
+        })
+        .filter(Boolean)
+        .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+}
+
+function writeSummaryFile(summaryFile) {
+    const results = readGradeResults();
+    const headers = [
+        'שם',
+        'סה"כ',
+        'אנדפוינטים',
+        'איכות קוד',
+        ...endpoints,
+        'FastAPI',
+        'JSON file',
+        'Logger',
+        'HTTPException'
+    ];
+
+    const rows = results.map((result) => [
+        result.name,
+        result.total,
+        result.endpoint_points,
+        result.code_quality_points,
+        ...endpoints.map((endpoint) => result[endpoint] ?? 0),
+        result.code_requirements?.fastapi_server_runs ?? 0,
+        result.code_requirements?.json_file_database ?? 0,
+        result.code_requirements?.logger_usage ?? 0,
+        result.code_requirements?.http_exception_usage ?? 0
+    ]);
+
+    const content = [
+        '# סיכום ציונים',
+        '',
+        `עודכן לאחרונה: ${new Date().toISOString()}`,
+        '',
+        markdownTable(headers, rows),
+        ''
+    ].join('\n');
+
+    fs.writeFileSync(summaryFile, content);
 }
 
 function sameJson(actual, expected) {
