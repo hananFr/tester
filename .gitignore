@@ -1,0 +1,10 @@
+.agents
+.codex
+.node_modules
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+package-lock.json
