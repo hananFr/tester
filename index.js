@@ -362,7 +362,7 @@ async function gradePostWeapon(grades) {
 
     const badCases = [
         {
-            body: {type: 'rifle', model: 'BAD-CONDITION', ammo_type: '5.56mm', condition: 'good enough'},
+            body: {type: 'rifle', model: 'BAD-CONDITION-TYPE', ammo_type: '5.56mm', condition: 123},
             statuses: [400, 422]
         },
         {
@@ -450,7 +450,12 @@ async function gradeDeleteWeapon(grades) {
 
     try {
         const before = readWeaponsFile();
-        const target = before[before.length - 1];
+        const target = before.find((weapon) => weapon && weapon.id !== undefined);
+
+        if (!target || !before.some((weapon) => weapon.id === target.id)) {
+            throw new Error('No existing weapon found in weapons.json for delete test');
+        }
+
         deletedId = target.id;
         await http.delete(`/weapons/${target.id}`);
         const after = readWeaponsFile();
