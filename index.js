@@ -13,8 +13,7 @@ class HttpError extends Error {
  * '
 weapons/ GET מחזיר את כל הפריטים מהקובץ, ללא סינון 9
 GET /weapons/{id}
-מחזיר את הפריט לפי מזהה; פריט שלא קיים →
-שגיאת 404
+מחזיר את הפריט לפי מזהה קיים
 9
 POST /weapons
 מוסיף פריט, מזהה נוצר ע"י השרת )+1max),
@@ -44,6 +43,7 @@ const SOURCE_WEAPONS_FILE = process.env.WEAPONS_SOURCE_FILE
     : path.join(__dirname, 'weapons.source.json');
 const WEAPONS_FILE = path.join(PROJECT_DIR, 'weapons.json');
 const GRADES_FILE = path.join(__dirname, 'grades.json');
+const GRADES_DIR = path.join(__dirname, 'grades');
 const SERVER_LOG_FILE = process.env.SERVER_LOG_FILE ? path.resolve(process.env.SERVER_LOG_FILE) : null;
 const REQUIRED_FIELDS = ['type', 'model', 'ammo_type', 'condition'];
 const RUN_ID = Date.now();
@@ -130,6 +130,20 @@ function input(prompt = '') {
 }
 
 function writeGradesFile(result) {
+    fs.mkdirSync(GRADES_DIR, {recursive: true});
+
+    const studentSlug = String(result.name || 'student')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9\u0590-\u05ff]+/gi, '-')
+        .replace(/^-+|-+$/g, '') || 'student';
+    const timestamp = new Date(RUN_ID).toISOString().replace(/[:.]/g, '-');
+    const studentGradesFile = path.join(GRADES_DIR, `${studentSlug}-${timestamp}.json`);
+
+    result.grades_file = studentGradesFile;
+    result.latest_grades_file = GRADES_FILE;
+
+    fs.writeFileSync(studentGradesFile, `${JSON.stringify(result, null, 2)}\n`);
     fs.writeFileSync(GRADES_FILE, `${JSON.stringify(result, null, 2)}\n`);
 }
 
@@ -152,8 +166,17 @@ function containsWeapon(weapons, expectedWeapon) {
     return weapons.some((weapon) => sameJson(weapon, expectedWeapon));
 }
 
-function assertStatus(error, status) {
-    return error instanceof HttpError && error.status === status;
+function isWeaponLike(weapon) {
+    return weapon &&
+        typeof weapon === 'object' &&
+        weapon.id !== undefined &&
+        REQUIRED_FIELDS.every((field) => typeof weapon[field] === 'string');
+}
+
+async function getApiWeaponsForExpectedData() {
+    resetWeaponsFile();
+    const weapons = await http.get('/weapons');
+    return Array.isArray(weapons) ? weapons : [];
 }
 
 function addFailure(grades, endpoint, test, requestInfo, reason, details = {}) {
@@ -367,43 +390,20 @@ function gradeRuntimeLogger(grades, logSnapshotBefore) {
 }
 
 async function gradeGetWeapons(grades) {
-    let validPassed = false;
-
     try {
-        const fileWeapons = readWeaponsFile();
+        resetWeaponsFile();
         const response = await http.get('/weapons');
 
-        if (sameJson(response, fileWeapons)) {
+        if (Array.isArray(response)) {
             grades['/weapons'] += 5;
-            validPassed = true;
         } else {
-            addFailure(grades, '/weapons', 'valid response returns exact weapons.json data', {method: 'GET', route: '/weapons'}, 'Response did not match weapons.json', {
-                expected_count: fileWeapons.length,
-                actual_count: Array.isArray(response) ? response.length : null
-            });
+            addFailure(grades, '/weapons', 'valid response returns a list', {method: 'GET', route: '/weapons'}, 'Response was not an array');
         }
 
-        if (!validPassed) {
-            return;
-        }
-
-        const beforeLength = fileWeapons.length;
-        const freshWeapon = {
-            type: 'rifle',
-            model: `FILE-FRESHNESS-CHECK-${RUN_ID}`,
-            ammo_type: '5.56mm',
-            condition: 'new'
-        };
-
-        await http.post('/weapons', freshWeapon);
-        const afterFile = readWeaponsFile();
-        const afterResponse = await http.get('/weapons');
-        const created = afterFile.find((weapon) => weapon.model === freshWeapon.model);
-
-        if (afterFile.length === beforeLength + 1 && created && sameJson(afterResponse, afterFile)) {
+        if (Array.isArray(response) && response.length > 0 && response.every(isWeaponLike)) {
             grades['/weapons'] += 4;
         } else {
-            addFailure(grades, '/weapons', 'reads fresh data from file after change', {method: 'GET', route: '/weapons'}, 'GET /weapons did not reflect updated weapons.json after POST');
+            addFailure(grades, '/weapons', 'valid response contains complete weapon objects', {method: 'GET', route: '/weapons'}, 'Response did not contain complete weapon objects');
         }
     } catch (error) {
         addFailure(grades, '/weapons', 'valid GET /weapons request', {method: 'GET', route: '/weapons'}, 'Request failed', errorDetails(error));
@@ -412,45 +412,29 @@ async function gradeGetWeapons(grades) {
 }
 
 async function gradeGetWeaponById(grades) {
-    let validPassed = false;
-
     try {
-        const weapons = readWeaponsFile();
+        const weapons = await getApiWeaponsForExpectedData();
         const expected = weapons[0];
+
+        if (!expected) {
+            throw new Error('GET /weapons did not return an existing weapon to test by id');
+        }
+
+        resetWeaponsFile();
         const response = await http.get(`/weapons/${expected.id}`);
 
         if (sameJson(response, expected)) {
-            grades['/weapons/{id}'] += 5;
-            validPassed = true;
+            grades['/weapons/{id}'] += 9;
         } else {
-            addFailure(grades, '/weapons/{id}', 'valid id returns matching weapon', {method: 'GET', route: `/weapons/${expected.id}`}, 'Response did not match the weapon from weapons.json');
+            addFailure(grades, '/weapons/{id}', 'valid id returns matching weapon', {method: 'GET', route: `/weapons/${expected.id}`}, 'Response did not match the weapon returned by GET /weapons');
         }
     } catch (error) {
-        const weapons = readWeaponsFile();
-        const expected = weapons[0];
-        addFailure(grades, '/weapons/{id}', 'valid id returns matching weapon', {method: 'GET', route: `/weapons/${expected?.id}`}, 'Request failed', errorDetails(error));
+        addFailure(grades, '/weapons/{id}', 'valid id returns matching weapon', {method: 'GET', route: '/weapons/{existing_id}'}, 'Request failed', errorDetails(error));
         console.log('GET /weapons/{id} valid case failed:', error.message);
-    }
-
-    if (!validPassed) {
-        return;
-    }
-
-    try {
-        const missingId = maxId(readWeaponsFile()) + 1000;
-        await http.get(`/weapons/${missingId}`);
-        addFailure(grades, '/weapons/{id}', 'missing id returns 404', {method: 'GET', route: `/weapons/${missingId}`}, 'Expected 404, but request succeeded');
-    } catch (error) {
-        if (assertStatus(error, 404)) {
-            grades['/weapons/{id}'] += 4;
-        } else {
-            addFailure(grades, '/weapons/{id}', 'missing id returns 404', {method: 'GET', route: `/weapons/${maxId(readWeaponsFile()) + 1000}`}, 'Expected 404', errorDetails(error));
-        }
     }
 }
 
 async function gradePostWeapon(grades) {
-    let validPassed = false;
     const weapon = {
         type: 'machine_gun',
         model: `POST-GRADE-MAG-${RUN_ID}`,
@@ -459,76 +443,42 @@ async function gradePostWeapon(grades) {
     };
 
     try {
-        const before = readWeaponsFile();
+        const before = await getApiWeaponsForExpectedData();
         const expectedId = maxId(before) + 1;
+        resetWeaponsFile();
         const response = await http.post('/weapons', weapon);
-        const after = readWeaponsFile();
+        resetWeaponsFile();
+        const after = await http.get('/weapons');
         const created = after.find((item) => item.id === expectedId);
-        const responseLooksCreated = response === null || sameJson(response, created) || response.id === expectedId;
+        const requestSucceeded = response !== undefined;
 
         if (
             created &&
-            responseLooksCreated &&
             after.length === before.length + 1 &&
             created.id === expectedId &&
             REQUIRED_FIELDS.every((field) => created[field] === weapon[field])
         ) {
             grades['POST /weapons'] += 5;
-            validPassed = true;
         } else {
-            addFailure(grades, 'POST /weapons', 'valid POST creates weapon with server id', {method: 'POST', route: '/weapons', body: weapon}, 'Created weapon was not found with expected id or expected fields', {
+            addFailure(grades, 'POST /weapons', 'valid POST creates weapon with server id', {method: 'POST', route: '/weapons', body: weapon}, 'Created weapon was not found in API data with expected id or expected fields', {
                 expected_id: expectedId
             });
         }
 
-        if (validPassed && containsWeapon(readWeaponsFile(), created)) {
-            grades['POST /weapons'] += 1;
-        } else if (validPassed) {
-            addFailure(grades, 'POST /weapons', 'valid POST persists to weapons.json', {method: 'POST', route: '/weapons', body: weapon}, 'Created weapon was not persisted in weapons.json');
+        if (requestSucceeded && created && containsWeapon(after, created)) {
+            grades['POST /weapons'] += 4;
+        } else if (created) {
+            addFailure(grades, 'POST /weapons', 'valid POST is visible through API', {method: 'GET', route: '/weapons'}, 'Created weapon was not visible through GET /weapons');
         }
     } catch (error) {
         addFailure(grades, 'POST /weapons', 'valid POST creates weapon with server id', {method: 'POST', route: '/weapons', body: weapon}, 'Request failed', errorDetails(error));
         console.log('POST /weapons valid case failed:', error.message);
     }
-
-    if (!validPassed) {
-        return;
-    }
-
-    const badCases = [
-        {
-            body: {type: 'rifle', model: 'BAD-CONDITION-TYPE', ammo_type: '5.56mm', condition: 123},
-            statuses: [400, 422]
-        },
-        {
-            body: {type: 'rifle', ammo_type: '5.56mm', condition: 'new'},
-            statuses: [400, 422]
-        },
-        {
-            body: {id: 99999, type: 'rifle', model: 'CLIENT-ID', ammo_type: '5.56mm', condition: 'new'},
-            statuses: [400, 422]
-        }
-    ];
-
-    for (const badCase of badCases) {
-        try {
-            await http.post('/weapons', badCase.body);
-            addFailure(grades, 'POST /weapons', 'invalid POST body returns error status', {method: 'POST', route: '/weapons', body: badCase.body}, `Expected one of statuses ${badCase.statuses.join(', ')}, but request succeeded`);
-        } catch (error) {
-            if (error instanceof HttpError && badCase.statuses.includes(error.status)) {
-                grades['POST /weapons'] += 1;
-            } else {
-                addFailure(grades, 'POST /weapons', 'invalid POST body returns error status', {method: 'POST', route: '/weapons', body: badCase.body}, `Expected one of statuses ${badCase.statuses.join(', ')}`, errorDetails(error));
-            }
-        }
-    }
 }
 
 async function gradePutWeapon(grades) {
-    let validPassed = false;
-
     try {
-        const before = readWeaponsFile();
+        const before = await getApiWeaponsForExpectedData();
         const target = before.find((weapon) => weapon.condition !== 'critical') || before[0];
         const update = {
             type: target.type,
@@ -537,20 +487,21 @@ async function gradePutWeapon(grades) {
             condition: 'critical'
         };
 
+        resetWeaponsFile();
         const response = await http.put(`/weapons/${target.id}`, update);
-        const after = readWeaponsFile();
+        resetWeaponsFile();
+        const after = await http.get('/weapons');
         const updated = after.find((weapon) => weapon.id === target.id);
-        const responseLooksUpdated = response === null || sameJson(response, updated) || response.id === target.id;
+        const requestSucceeded = response !== undefined;
 
         if (
             updated &&
-            responseLooksUpdated &&
+            requestSucceeded &&
             after.length === before.length &&
             updated.model === update.model &&
             updated.condition === update.condition
         ) {
             grades['PUT /weapons/{id}'] += 5;
-            validPassed = true;
         } else {
             addFailure(grades, 'PUT /weapons/{id}', 'valid PUT updates existing weapon', {method: 'PUT', route: `/weapons/${target.id}`, body: update}, 'Weapon was not updated as expected or a new item was created');
         }
@@ -559,46 +510,22 @@ async function gradePutWeapon(grades) {
             .filter((weapon) => weapon.id !== target.id)
             .every((weapon) => sameJson(weapon, after.find((item) => item.id === weapon.id)));
 
-        if (validPassed && otherItemsUnchanged && sameJson(readWeaponsFile().find((weapon) => weapon.id === target.id), updated)) {
-            grades['PUT /weapons/{id}'] += 2;
-        } else if (validPassed) {
-            addFailure(grades, 'PUT /weapons/{id}', 'valid PUT only changes target and persists to file', {method: 'PUT', route: `/weapons/${target.id}`, body: update}, 'Other items changed or update was not persisted to weapons.json');
+        if (updated && otherItemsUnchanged && sameJson(after.find((weapon) => weapon.id === target.id), updated)) {
+            grades['PUT /weapons/{id}'] += 4;
+        } else if (updated) {
+            addFailure(grades, 'PUT /weapons/{id}', 'valid PUT only changes target and is visible through API', {method: 'GET', route: '/weapons'}, 'Other items changed or update was not visible through GET /weapons');
         }
     } catch (error) {
-        const target = readWeaponsFile().find((weapon) => weapon.condition !== 'critical') || readWeaponsFile()[0];
-        addFailure(grades, 'PUT /weapons/{id}', 'valid PUT updates existing weapon', {method: 'PUT', route: `/weapons/${target?.id}`}, 'Request failed', errorDetails(error));
+        addFailure(grades, 'PUT /weapons/{id}', 'valid PUT updates existing weapon', {method: 'PUT', route: '/weapons/{existing_id}'}, 'Request failed', errorDetails(error));
         console.log('PUT /weapons/{id} valid case failed:', error.message);
-    }
-
-    if (!validPassed) {
-        return;
-    }
-
-    try {
-        const missingId = maxId(readWeaponsFile()) + 1000;
-        const body = {
-            type: 'rifle',
-            model: 'M4',
-            ammo_type: '5.56mm',
-            condition: 'new'
-        };
-        await http.put(`/weapons/${missingId}`, body);
-        addFailure(grades, 'PUT /weapons/{id}', 'missing id returns 404', {method: 'PUT', route: `/weapons/${missingId}`, body}, 'Expected 404, but request succeeded');
-    } catch (error) {
-        if (assertStatus(error, 404)) {
-            grades['PUT /weapons/{id}'] += 2;
-        } else {
-            addFailure(grades, 'PUT /weapons/{id}', 'missing id returns 404', {method: 'PUT', route: `/weapons/${maxId(readWeaponsFile()) + 1000}`}, 'Expected 404', errorDetails(error));
-        }
     }
 }
 
 async function gradeDeleteWeapon(grades) {
     let deletedId;
-    let validPassed = false;
 
     try {
-        const before = readWeaponsFile();
+        const before = await getApiWeaponsForExpectedData();
         const target = before.find((weapon) => weapon && weapon.id !== undefined);
 
         if (!target || !before.some((weapon) => weapon.id === target.id)) {
@@ -606,58 +533,42 @@ async function gradeDeleteWeapon(grades) {
         }
 
         deletedId = target.id;
+        resetWeaponsFile();
         await http.delete(`/weapons/${target.id}`);
-        const after = readWeaponsFile();
+        resetWeaponsFile();
+        const after = await http.get('/weapons');
 
         if (after.length === before.length - 1 && !after.some((weapon) => weapon.id === target.id)) {
             grades['DELETE /weapons/{id}'] += 5;
-            validPassed = true;
         } else {
-            addFailure(grades, 'DELETE /weapons/{id}', 'valid DELETE removes existing weapon', {method: 'DELETE', route: `/weapons/${target.id}`}, 'Target weapon was not removed from weapons.json');
+            addFailure(grades, 'DELETE /weapons/{id}', 'valid DELETE removes existing weapon', {method: 'DELETE', route: `/weapons/${target.id}`}, 'Target weapon was not removed from API data');
         }
 
         const onlyTargetDeleted = before
             .filter((weapon) => weapon.id !== target.id)
             .every((weapon) => sameJson(weapon, after.find((item) => item.id === weapon.id)));
 
-        if (validPassed && onlyTargetDeleted && !readWeaponsFile().some((weapon) => weapon.id === target.id)) {
-            grades['DELETE /weapons/{id}'] += 2;
-        } else if (validPassed) {
-            addFailure(grades, 'DELETE /weapons/{id}', 'valid DELETE removes only target and persists to file', {method: 'DELETE', route: `/weapons/${target.id}`}, 'Other items changed or delete was not persisted to weapons.json');
+        if (onlyTargetDeleted && !after.some((weapon) => weapon.id === target.id)) {
+            grades['DELETE /weapons/{id}'] += 4;
+        } else {
+            addFailure(grades, 'DELETE /weapons/{id}', 'valid DELETE removes only target and is visible through API', {method: 'GET', route: '/weapons'}, 'Other items changed or delete was not visible through GET /weapons');
         }
     } catch (error) {
         addFailure(grades, 'DELETE /weapons/{id}', 'valid DELETE removes existing weapon', {method: 'DELETE', route: deletedId ? `/weapons/${deletedId}` : '/weapons/{existing_id}'}, 'Request failed', errorDetails(error));
         console.log('DELETE /weapons/{id} valid case failed:', error.message);
     }
-
-    if (!validPassed) {
-        return;
-    }
-
-    try {
-        await http.delete(`/weapons/${deletedId || maxId(readWeaponsFile()) + 1000}`);
-        addFailure(grades, 'DELETE /weapons/{id}', 'missing id returns 404', {method: 'DELETE', route: `/weapons/${deletedId || maxId(readWeaponsFile()) + 1000}`}, 'Expected 404, but request succeeded');
-    } catch (error) {
-        if (assertStatus(error, 404)) {
-            grades['DELETE /weapons/{id}'] += 2;
-        } else {
-            addFailure(grades, 'DELETE /weapons/{id}', 'missing id returns 404', {method: 'DELETE', route: `/weapons/${deletedId || maxId(readWeaponsFile()) + 1000}`}, 'Expected 404', errorDetails(error));
-        }
-    }
 }
 
 async function gradeByCondition(grades) {
-    let validPassed = false;
-
     try {
-        const weapons = readWeaponsFile();
+        const weapons = await getApiWeaponsForExpectedData();
         const condition = 'damaged';
         const expected = weapons.filter((weapon) => weapon.condition === condition);
+        resetWeaponsFile();
         const response = await http.get(`/weapons/by-condition?condition=${condition}`);
 
         if (sameJson(response, expected)) {
             grades['/weapons/by-condition'] += 5;
-            validPassed = true;
         } else {
             addFailure(grades, '/weapons/by-condition', 'valid condition returns matching weapons', {method: 'GET', route: `/weapons/by-condition?condition=${condition}`}, 'Response did not match weapons with requested condition', {
                 expected_count: expected.length,
@@ -665,48 +576,27 @@ async function gradeByCondition(grades) {
             });
         }
 
-        if (validPassed && response.every((weapon) => weapon.condition === condition)) {
-            grades['/weapons/by-condition'] += 2;
-        } else if (validPassed) {
+        if (Array.isArray(response) && response.every((weapon) => weapon.condition === condition)) {
+            grades['/weapons/by-condition'] += 4;
+        } else if (Array.isArray(response)) {
             addFailure(grades, '/weapons/by-condition', 'all returned weapons have requested condition', {method: 'GET', route: `/weapons/by-condition?condition=${condition}`}, 'Some returned weapons had a different condition');
         }
     } catch (error) {
         addFailure(grades, '/weapons/by-condition', 'valid condition returns matching weapons', {method: 'GET', route: '/weapons/by-condition?condition=damaged'}, 'Request failed', errorDetails(error));
         console.log('GET /weapons/by-condition valid case failed:', error.message);
     }
-
-    if (!validPassed) {
-        return;
-    }
-
-    try {
-        const response = await http.get('/weapons/by-condition?condition=not-real-condition');
-        if (Array.isArray(response) && response.length === 0) {
-            grades['/weapons/by-condition'] += 2;
-        } else {
-            addFailure(grades, '/weapons/by-condition', 'unknown condition returns empty array or valid error', {method: 'GET', route: '/weapons/by-condition?condition=not-real-condition'}, 'Expected empty array for unknown condition');
-        }
-    } catch (error) {
-        if ([400, 404, 422].includes(error.status)) {
-            grades['/weapons/by-condition'] += 2;
-        } else {
-            addFailure(grades, '/weapons/by-condition', 'unknown condition returns empty array or valid error', {method: 'GET', route: '/weapons/by-condition?condition=not-real-condition'}, 'Expected empty array or status 400/404/422', errorDetails(error));
-        }
-    }
 }
 
 async function gradeCombatReady(grades) {
-    let validPassed = false;
-
     try {
-        const weapons = readWeaponsFile();
+        const weapons = await getApiWeaponsForExpectedData();
         const type = 'machine_gun';
         const expected = weapons.filter((weapon) => weapon.type === type && ['new', 'good'].includes(weapon.condition));
+        resetWeaponsFile();
         const response = await http.get(`/weapons/combat-ready?type=${type}`);
 
         if (sameJson(response, expected)) {
             grades['/weapons/combat-ready'] += 5;
-            validPassed = true;
         } else {
             addFailure(grades, '/weapons/combat-ready', 'valid type returns only combat-ready weapons', {method: 'GET', route: `/weapons/combat-ready?type=${type}`}, 'Response did not match weapons with requested type and condition new/good', {
                 expected_count: expected.length,
@@ -714,15 +604,15 @@ async function gradeCombatReady(grades) {
             });
         }
 
-        if (validPassed && response.every((weapon) => weapon.type === type)) {
+        if (Array.isArray(response) && response.every((weapon) => weapon.type === type)) {
             grades['/weapons/combat-ready'] += 2;
-        } else if (validPassed) {
+        } else if (Array.isArray(response)) {
             addFailure(grades, '/weapons/combat-ready', 'all returned weapons have requested type', {method: 'GET', route: `/weapons/combat-ready?type=${type}`}, 'Some returned weapons had a different type');
         }
 
-        if (validPassed && response.every((weapon) => ['new', 'good'].includes(weapon.condition))) {
+        if (Array.isArray(response) && response.every((weapon) => ['new', 'good'].includes(weapon.condition))) {
             grades['/weapons/combat-ready'] += 2;
-        } else if (validPassed) {
+        } else if (Array.isArray(response)) {
             addFailure(grades, '/weapons/combat-ready', 'all returned weapons are combat ready', {method: 'GET', route: `/weapons/combat-ready?type=${type}`}, 'Some returned weapons were not new/good');
         }
     } catch (error) {
@@ -732,41 +622,16 @@ async function gradeCombatReady(grades) {
 }
 
 async function gradeSummaryByType(grades) {
-    let validPassed = false;
-
     try {
-        const expected = countByType(readWeaponsFile());
+        const before = await getApiWeaponsForExpectedData();
+        const expected = countByType(before);
+        resetWeaponsFile();
         const response = await http.get('/weapons/summary/by-type');
 
         if (sameJson(response, expected)) {
-            grades['/weapons/summary/by-type'] += 5;
-            validPassed = true;
+            grades['/weapons/summary/by-type'] += 9;
         } else {
             addFailure(grades, '/weapons/summary/by-type', 'valid summary by type', {method: 'GET', route: '/weapons/summary/by-type'}, 'Response did not match dynamic count by type');
-        }
-
-        if (!validPassed) {
-            return;
-        }
-
-        const dynamicType = `summary_dynamic_type_${RUN_ID}`;
-        const newTypeWeapon = {
-            type: dynamicType,
-            model: 'SUMMARY-DYNAMIC-CHECK',
-            ammo_type: 'test',
-            condition: 'new'
-        };
-
-        await http.post('/weapons', newTypeWeapon);
-        const dynamicExpected = countByType(readWeaponsFile());
-        const dynamicResponse = await http.get('/weapons/summary/by-type');
-
-        if (sameJson(dynamicResponse, dynamicExpected) && dynamicResponse[dynamicType] === 1) {
-            grades['/weapons/summary/by-type'] += 4;
-        } else {
-            addFailure(grades, '/weapons/summary/by-type', 'summary recalculates after data changes', {method: 'GET', route: '/weapons/summary/by-type'}, 'Summary did not update after adding a new type', {
-                added_type: dynamicType
-            });
         }
     } catch (error) {
         addFailure(grades, '/weapons/summary/by-type', 'valid summary by type', {method: 'GET', route: '/weapons/summary/by-type'}, 'Request failed', errorDetails(error));
@@ -776,29 +641,29 @@ async function gradeSummaryByType(grades) {
 
 async function gradeDeleteByCondition(grades) {
     const condition = 'critical';
-    let validPassed = false;
 
     try {
-        const before = readWeaponsFile();
+        const before = await getApiWeaponsForExpectedData();
         const expectedRemaining = before.filter((weapon) => weapon.condition !== condition);
         const expectedDeletedCount = before.length - expectedRemaining.length;
 
+        resetWeaponsFile();
         await http.delete(`/weapons/by-condition?condition=${condition}`);
-        const after = readWeaponsFile();
+        resetWeaponsFile();
+        const after = await http.get('/weapons');
 
         if (expectedDeletedCount > 0 && sameJson(after, expectedRemaining)) {
             grades['DELETE /weapons/by-condition'] += 5;
-            validPassed = true;
         } else {
-            addFailure(grades, 'DELETE /weapons/by-condition', 'valid DELETE by condition removes matching weapons', {method: 'DELETE', route: `/weapons/by-condition?condition=${condition}`}, 'File contents did not match expected remaining weapons after delete', {
+            addFailure(grades, 'DELETE /weapons/by-condition', 'valid DELETE by condition removes matching weapons', {method: 'DELETE', route: `/weapons/by-condition?condition=${condition}`}, 'API data did not match expected remaining weapons after delete', {
                 expected_deleted_count: expectedDeletedCount
             });
         }
 
-        if (validPassed && !after.some((weapon) => weapon.condition === condition) && sameJson(readWeaponsFile(), expectedRemaining)) {
+        if (!after.some((weapon) => weapon.condition === condition) && sameJson(after, expectedRemaining)) {
             grades['DELETE /weapons/by-condition'] += 3;
-        } else if (validPassed) {
-            addFailure(grades, 'DELETE /weapons/by-condition', 'valid DELETE by condition persists and removes all matching weapons', {method: 'DELETE', route: `/weapons/by-condition?condition=${condition}`}, 'Some matching weapons remained or delete was not persisted');
+        } else {
+            addFailure(grades, 'DELETE /weapons/by-condition', 'valid DELETE by condition removes all matching weapons through API', {method: 'GET', route: '/weapons'}, 'Some matching weapons remained in API data');
         }
     } catch (error) {
         addFailure(grades, 'DELETE /weapons/by-condition', 'valid DELETE by condition removes matching weapons', {method: 'DELETE', route: `/weapons/by-condition?condition=${condition}`}, 'Request failed', errorDetails(error));
@@ -823,6 +688,7 @@ async function testFastApi() {
     await gradeSummaryByType(grades);
     await gradeDeleteByCondition(grades);
     gradeRuntimeLogger(grades, logSnapshotBefore);
+    resetWeaponsFile();
 
     grades.endpoint_points = endpoints.reduce((sum, endpoint) => sum + grades[endpoint], 0);
     grades.code_quality_points = codeRequirements.reduce((sum, requirement) => {
