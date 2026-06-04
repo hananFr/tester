@@ -162,10 +162,13 @@ Student Name
   "/weapons/combat-ready": 9,
   "/weapons/summary/by-type": 9,
   "DELETE /weapons/by-condition": 8,
+  "failures": [],
   "total": 100,
   "max_score": 100
 }
 ```
+
+אם בדיקה נכשלת, יופיעו פרטים בתוך `failures`. כל כשל כולל את שם האנדפוינט, שם הבדיקה, הבקשה המדויקת שנשלחה, והסיבה לכשל.
 
 ## הערות חשובות לבודק
 

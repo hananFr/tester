@@ -154,6 +154,29 @@ function assertStatus(error, status) {
     return error instanceof HttpError && error.status === status;
 }
 
+function addFailure(grades, endpoint, test, requestInfo, reason, details = {}) {
+    grades.failures.push({
+        endpoint,
+        test,
+        request: requestInfo,
+        reason,
+        ...details
+    });
+}
+
+function errorDetails(error) {
+    if (error instanceof HttpError) {
+        return {
+            status: error.status,
+            response: error.body
+        };
+    }
+
+    return {
+        error: error.message
+    };
+}
+
 async function request(method, route, body) {
     const options = {
         method,
@@ -198,7 +221,8 @@ function createGradeSheet(studentName) {
         },
         project_dir: PROJECT_DIR,
         weapons_file: WEAPONS_FILE,
-        source_weapons_file: SOURCE_WEAPONS_FILE
+        source_weapons_file: SOURCE_WEAPONS_FILE,
+        failures: []
     };
 
     endpoints.forEach((endpoint) => {
@@ -264,6 +288,11 @@ async function gradeGetWeapons(grades) {
         if (sameJson(response, fileWeapons)) {
             grades['/weapons'] += 5;
             validPassed = true;
+        } else {
+            addFailure(grades, '/weapons', 'valid response returns exact weapons.json data', {method: 'GET', route: '/weapons'}, 'Response did not match weapons.json', {
+                expected_count: fileWeapons.length,
+                actual_count: Array.isArray(response) ? response.length : null
+            });
         }
 
         if (!validPassed) {
@@ -285,8 +314,11 @@ async function gradeGetWeapons(grades) {
 
         if (afterFile.length === beforeLength + 1 && created && sameJson(afterResponse, afterFile)) {
             grades['/weapons'] += 4;
+        } else {
+            addFailure(grades, '/weapons', 'reads fresh data from file after change', {method: 'GET', route: '/weapons'}, 'GET /weapons did not reflect updated weapons.json after POST');
         }
     } catch (error) {
+        addFailure(grades, '/weapons', 'valid GET /weapons request', {method: 'GET', route: '/weapons'}, 'Request failed', errorDetails(error));
         console.log('GET /weapons failed:', error.message);
     }
 }
@@ -302,8 +334,13 @@ async function gradeGetWeaponById(grades) {
         if (sameJson(response, expected)) {
             grades['/weapons/{id}'] += 5;
             validPassed = true;
+        } else {
+            addFailure(grades, '/weapons/{id}', 'valid id returns matching weapon', {method: 'GET', route: `/weapons/${expected.id}`}, 'Response did not match the weapon from weapons.json');
         }
     } catch (error) {
+        const weapons = readWeaponsFile();
+        const expected = weapons[0];
+        addFailure(grades, '/weapons/{id}', 'valid id returns matching weapon', {method: 'GET', route: `/weapons/${expected?.id}`}, 'Request failed', errorDetails(error));
         console.log('GET /weapons/{id} valid case failed:', error.message);
     }
 
@@ -314,9 +351,12 @@ async function gradeGetWeaponById(grades) {
     try {
         const missingId = maxId(readWeaponsFile()) + 1000;
         await http.get(`/weapons/${missingId}`);
+        addFailure(grades, '/weapons/{id}', 'missing id returns 404', {method: 'GET', route: `/weapons/${missingId}`}, 'Expected 404, but request succeeded');
     } catch (error) {
         if (assertStatus(error, 404)) {
             grades['/weapons/{id}'] += 4;
+        } else {
+            addFailure(grades, '/weapons/{id}', 'missing id returns 404', {method: 'GET', route: `/weapons/${maxId(readWeaponsFile()) + 1000}`}, 'Expected 404', errorDetails(error));
         }
     }
 }
@@ -347,12 +387,19 @@ async function gradePostWeapon(grades) {
         ) {
             grades['POST /weapons'] += 5;
             validPassed = true;
+        } else {
+            addFailure(grades, 'POST /weapons', 'valid POST creates weapon with server id', {method: 'POST', route: '/weapons', body: weapon}, 'Created weapon was not found with expected id or expected fields', {
+                expected_id: expectedId
+            });
         }
 
         if (validPassed && containsWeapon(readWeaponsFile(), created)) {
             grades['POST /weapons'] += 1;
+        } else if (validPassed) {
+            addFailure(grades, 'POST /weapons', 'valid POST persists to weapons.json', {method: 'POST', route: '/weapons', body: weapon}, 'Created weapon was not persisted in weapons.json');
         }
     } catch (error) {
+        addFailure(grades, 'POST /weapons', 'valid POST creates weapon with server id', {method: 'POST', route: '/weapons', body: weapon}, 'Request failed', errorDetails(error));
         console.log('POST /weapons valid case failed:', error.message);
     }
 
@@ -378,9 +425,12 @@ async function gradePostWeapon(grades) {
     for (const badCase of badCases) {
         try {
             await http.post('/weapons', badCase.body);
+            addFailure(grades, 'POST /weapons', 'invalid POST body returns error status', {method: 'POST', route: '/weapons', body: badCase.body}, `Expected one of statuses ${badCase.statuses.join(', ')}, but request succeeded`);
         } catch (error) {
             if (error instanceof HttpError && badCase.statuses.includes(error.status)) {
                 grades['POST /weapons'] += 1;
+            } else {
+                addFailure(grades, 'POST /weapons', 'invalid POST body returns error status', {method: 'POST', route: '/weapons', body: badCase.body}, `Expected one of statuses ${badCase.statuses.join(', ')}`, errorDetails(error));
             }
         }
     }
@@ -413,6 +463,8 @@ async function gradePutWeapon(grades) {
         ) {
             grades['PUT /weapons/{id}'] += 5;
             validPassed = true;
+        } else {
+            addFailure(grades, 'PUT /weapons/{id}', 'valid PUT updates existing weapon', {method: 'PUT', route: `/weapons/${target.id}`, body: update}, 'Weapon was not updated as expected or a new item was created');
         }
 
         const otherItemsUnchanged = before
@@ -421,8 +473,12 @@ async function gradePutWeapon(grades) {
 
         if (validPassed && otherItemsUnchanged && sameJson(readWeaponsFile().find((weapon) => weapon.id === target.id), updated)) {
             grades['PUT /weapons/{id}'] += 2;
+        } else if (validPassed) {
+            addFailure(grades, 'PUT /weapons/{id}', 'valid PUT only changes target and persists to file', {method: 'PUT', route: `/weapons/${target.id}`, body: update}, 'Other items changed or update was not persisted to weapons.json');
         }
     } catch (error) {
+        const target = readWeaponsFile().find((weapon) => weapon.condition !== 'critical') || readWeaponsFile()[0];
+        addFailure(grades, 'PUT /weapons/{id}', 'valid PUT updates existing weapon', {method: 'PUT', route: `/weapons/${target?.id}`}, 'Request failed', errorDetails(error));
         console.log('PUT /weapons/{id} valid case failed:', error.message);
     }
 
@@ -431,15 +487,20 @@ async function gradePutWeapon(grades) {
     }
 
     try {
-        await http.put(`/weapons/${maxId(readWeaponsFile()) + 1000}`, {
+        const missingId = maxId(readWeaponsFile()) + 1000;
+        const body = {
             type: 'rifle',
             model: 'M4',
             ammo_type: '5.56mm',
             condition: 'new'
-        });
+        };
+        await http.put(`/weapons/${missingId}`, body);
+        addFailure(grades, 'PUT /weapons/{id}', 'missing id returns 404', {method: 'PUT', route: `/weapons/${missingId}`, body}, 'Expected 404, but request succeeded');
     } catch (error) {
         if (assertStatus(error, 404)) {
             grades['PUT /weapons/{id}'] += 2;
+        } else {
+            addFailure(grades, 'PUT /weapons/{id}', 'missing id returns 404', {method: 'PUT', route: `/weapons/${maxId(readWeaponsFile()) + 1000}`}, 'Expected 404', errorDetails(error));
         }
     }
 }
@@ -463,6 +524,8 @@ async function gradeDeleteWeapon(grades) {
         if (after.length === before.length - 1 && !after.some((weapon) => weapon.id === target.id)) {
             grades['DELETE /weapons/{id}'] += 5;
             validPassed = true;
+        } else {
+            addFailure(grades, 'DELETE /weapons/{id}', 'valid DELETE removes existing weapon', {method: 'DELETE', route: `/weapons/${target.id}`}, 'Target weapon was not removed from weapons.json');
         }
 
         const onlyTargetDeleted = before
@@ -471,8 +534,11 @@ async function gradeDeleteWeapon(grades) {
 
         if (validPassed && onlyTargetDeleted && !readWeaponsFile().some((weapon) => weapon.id === target.id)) {
             grades['DELETE /weapons/{id}'] += 2;
+        } else if (validPassed) {
+            addFailure(grades, 'DELETE /weapons/{id}', 'valid DELETE removes only target and persists to file', {method: 'DELETE', route: `/weapons/${target.id}`}, 'Other items changed or delete was not persisted to weapons.json');
         }
     } catch (error) {
+        addFailure(grades, 'DELETE /weapons/{id}', 'valid DELETE removes existing weapon', {method: 'DELETE', route: deletedId ? `/weapons/${deletedId}` : '/weapons/{existing_id}'}, 'Request failed', errorDetails(error));
         console.log('DELETE /weapons/{id} valid case failed:', error.message);
     }
 
@@ -482,9 +548,12 @@ async function gradeDeleteWeapon(grades) {
 
     try {
         await http.delete(`/weapons/${deletedId || maxId(readWeaponsFile()) + 1000}`);
+        addFailure(grades, 'DELETE /weapons/{id}', 'missing id returns 404', {method: 'DELETE', route: `/weapons/${deletedId || maxId(readWeaponsFile()) + 1000}`}, 'Expected 404, but request succeeded');
     } catch (error) {
         if (assertStatus(error, 404)) {
             grades['DELETE /weapons/{id}'] += 2;
+        } else {
+            addFailure(grades, 'DELETE /weapons/{id}', 'missing id returns 404', {method: 'DELETE', route: `/weapons/${deletedId || maxId(readWeaponsFile()) + 1000}`}, 'Expected 404', errorDetails(error));
         }
     }
 }
@@ -501,12 +570,20 @@ async function gradeByCondition(grades) {
         if (sameJson(response, expected)) {
             grades['/weapons/by-condition'] += 5;
             validPassed = true;
+        } else {
+            addFailure(grades, '/weapons/by-condition', 'valid condition returns matching weapons', {method: 'GET', route: `/weapons/by-condition?condition=${condition}`}, 'Response did not match weapons with requested condition', {
+                expected_count: expected.length,
+                actual_count: Array.isArray(response) ? response.length : null
+            });
         }
 
         if (validPassed && response.every((weapon) => weapon.condition === condition)) {
             grades['/weapons/by-condition'] += 2;
+        } else if (validPassed) {
+            addFailure(grades, '/weapons/by-condition', 'all returned weapons have requested condition', {method: 'GET', route: `/weapons/by-condition?condition=${condition}`}, 'Some returned weapons had a different condition');
         }
     } catch (error) {
+        addFailure(grades, '/weapons/by-condition', 'valid condition returns matching weapons', {method: 'GET', route: '/weapons/by-condition?condition=damaged'}, 'Request failed', errorDetails(error));
         console.log('GET /weapons/by-condition valid case failed:', error.message);
     }
 
@@ -518,10 +595,14 @@ async function gradeByCondition(grades) {
         const response = await http.get('/weapons/by-condition?condition=not-real-condition');
         if (Array.isArray(response) && response.length === 0) {
             grades['/weapons/by-condition'] += 2;
+        } else {
+            addFailure(grades, '/weapons/by-condition', 'unknown condition returns empty array or valid error', {method: 'GET', route: '/weapons/by-condition?condition=not-real-condition'}, 'Expected empty array for unknown condition');
         }
     } catch (error) {
         if ([400, 404, 422].includes(error.status)) {
             grades['/weapons/by-condition'] += 2;
+        } else {
+            addFailure(grades, '/weapons/by-condition', 'unknown condition returns empty array or valid error', {method: 'GET', route: '/weapons/by-condition?condition=not-real-condition'}, 'Expected empty array or status 400/404/422', errorDetails(error));
         }
     }
 }
@@ -538,16 +619,26 @@ async function gradeCombatReady(grades) {
         if (sameJson(response, expected)) {
             grades['/weapons/combat-ready'] += 5;
             validPassed = true;
+        } else {
+            addFailure(grades, '/weapons/combat-ready', 'valid type returns only combat-ready weapons', {method: 'GET', route: `/weapons/combat-ready?type=${type}`}, 'Response did not match weapons with requested type and condition new/good', {
+                expected_count: expected.length,
+                actual_count: Array.isArray(response) ? response.length : null
+            });
         }
 
         if (validPassed && response.every((weapon) => weapon.type === type)) {
             grades['/weapons/combat-ready'] += 2;
+        } else if (validPassed) {
+            addFailure(grades, '/weapons/combat-ready', 'all returned weapons have requested type', {method: 'GET', route: `/weapons/combat-ready?type=${type}`}, 'Some returned weapons had a different type');
         }
 
         if (validPassed && response.every((weapon) => ['new', 'good'].includes(weapon.condition))) {
             grades['/weapons/combat-ready'] += 2;
+        } else if (validPassed) {
+            addFailure(grades, '/weapons/combat-ready', 'all returned weapons are combat ready', {method: 'GET', route: `/weapons/combat-ready?type=${type}`}, 'Some returned weapons were not new/good');
         }
     } catch (error) {
+        addFailure(grades, '/weapons/combat-ready', 'valid type returns only combat-ready weapons', {method: 'GET', route: '/weapons/combat-ready?type=machine_gun'}, 'Request failed', errorDetails(error));
         console.log('GET /weapons/combat-ready valid case failed:', error.message);
     }
 }
@@ -562,6 +653,8 @@ async function gradeSummaryByType(grades) {
         if (sameJson(response, expected)) {
             grades['/weapons/summary/by-type'] += 5;
             validPassed = true;
+        } else {
+            addFailure(grades, '/weapons/summary/by-type', 'valid summary by type', {method: 'GET', route: '/weapons/summary/by-type'}, 'Response did not match dynamic count by type');
         }
 
         if (!validPassed) {
@@ -582,8 +675,13 @@ async function gradeSummaryByType(grades) {
 
         if (sameJson(dynamicResponse, dynamicExpected) && dynamicResponse[dynamicType] === 1) {
             grades['/weapons/summary/by-type'] += 4;
+        } else {
+            addFailure(grades, '/weapons/summary/by-type', 'summary recalculates after data changes', {method: 'GET', route: '/weapons/summary/by-type'}, 'Summary did not update after adding a new type', {
+                added_type: dynamicType
+            });
         }
     } catch (error) {
+        addFailure(grades, '/weapons/summary/by-type', 'valid summary by type', {method: 'GET', route: '/weapons/summary/by-type'}, 'Request failed', errorDetails(error));
         console.log('GET /weapons/summary/by-type failed:', error.message);
     }
 }
@@ -603,12 +701,19 @@ async function gradeDeleteByCondition(grades) {
         if (expectedDeletedCount > 0 && sameJson(after, expectedRemaining)) {
             grades['DELETE /weapons/by-condition'] += 5;
             validPassed = true;
+        } else {
+            addFailure(grades, 'DELETE /weapons/by-condition', 'valid DELETE by condition removes matching weapons', {method: 'DELETE', route: `/weapons/by-condition?condition=${condition}`}, 'File contents did not match expected remaining weapons after delete', {
+                expected_deleted_count: expectedDeletedCount
+            });
         }
 
         if (validPassed && !after.some((weapon) => weapon.condition === condition) && sameJson(readWeaponsFile(), expectedRemaining)) {
             grades['DELETE /weapons/by-condition'] += 3;
+        } else if (validPassed) {
+            addFailure(grades, 'DELETE /weapons/by-condition', 'valid DELETE by condition persists and removes all matching weapons', {method: 'DELETE', route: `/weapons/by-condition?condition=${condition}`}, 'Some matching weapons remained or delete was not persisted');
         }
     } catch (error) {
+        addFailure(grades, 'DELETE /weapons/by-condition', 'valid DELETE by condition removes matching weapons', {method: 'DELETE', route: `/weapons/by-condition?condition=${condition}`}, 'Request failed', errorDetails(error));
         console.log('DELETE /weapons/by-condition valid case failed:', error.message);
     }
 }
