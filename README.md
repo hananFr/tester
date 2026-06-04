@@ -19,7 +19,7 @@ uvicorn main:app --reload
 
 ## מאיפה מריצים
 
-הדרך המומלצת: להעתיק את `index.js`, `package.json` ו־`weapons.json` לתיקיית הפרויקט של התלמיד, ואז להריץ משם:
+הדרך המומלצת: להעתיק את `index.js`, `package.json`, `weapons.json` ו־`weapons.source.json` לתיקיית הפרויקט של התלמיד, ואז להריץ משם:
 
 ```bash
 node index.js
@@ -28,6 +28,7 @@ node index.js
 במצב הזה הסקריפט:
 
 - קורא את `weapons.json` מתוך תיקיית הפרויקט.
+- מאפס בתחילת כל ריצה את `weapons.json` לפי `weapons.source.json`.
 - סורק את קבצי ה־`.py` של התלמיד באותה תיקייה.
 - שומר את התוצאה ב־`grades.json` ליד `index.js`.
 
@@ -39,7 +40,26 @@ STUDENT_PROJECT_DIR=/path/to/student/project node index.js
 
 במצב הזה הסקריפט יקרא את `weapons.json` ויסרוק את קבצי ה־Python מתוך `STUDENT_PROJECT_DIR`, אבל עדיין ישמור את `grades.json` בתיקייה שממנה נמצא `index.js`.
 
+אם קובץ המקור נמצא במקום אחר, אפשר להעביר גם אותו:
+
+```bash
+STUDENT_PROJECT_DIR=/path/to/student/project WEAPONS_SOURCE_FILE=/path/to/weapons.source.json node index.js
+```
+
 חשוב: שרת התלמיד חייב להשתמש באותו `weapons.json` שהסקריפט קורא ממנו. לכן הכי פשוט ובטוח להריץ את הסקריפט מתוך תיקיית הפרויקט של התלמיד.
+
+## איפוס נתונים
+
+הבדיקות משנות את `weapons.json`: הן מוסיפות, מעדכנות ומוחקות פריטים.  
+כדי שכל תלמיד וכל ריצה יתחילו מאותו מצב, הסקריפט מאפס בתחילת הריצה את `weapons.json` מתוך `weapons.source.json`.
+
+כלומר:
+
+```text
+weapons.source.json -> נדרס לתוך -> weapons.json
+```
+
+אין לערוך את `weapons.source.json` במהלך בדיקה רגילה. אם רוצים לשנות את הדאטה ההתחלתי של המבחן, משנים את `weapons.source.json`, ואז כל ריצה תתחיל מהדאטה החדש.
 
 ## הרצת הבדיקה
 
@@ -109,6 +129,8 @@ Student Name
 - מחיקת כל הפריטים לפי `condition`.
 - שהפעולות שמשנות מידע באמת מעדכנות את קובץ ה־JSON, ולא רק משתנה בזיכרון.
 
+הערה על מחיקה: `DELETE /weapons/{id}` נבדק על פריט שכבר קיים ב־`weapons.json` לאחר האיפוס. לכן גם אם `POST /weapons` לא עובד, עדיין אפשר לקבל ניקוד על מחיקה לפי מזהה.
+
 ## פלט
 
 בסיום הריצה יווצר או יעודכן הקובץ `grades.json`.
@@ -127,6 +149,8 @@ Student Name
     "http_exception_usage": 5
   },
   "project_dir": "/path/to/student/project",
+  "weapons_file": "/path/to/student/project/weapons.json",
+  "source_weapons_file": "/path/to/checker/weapons.source.json",
   "/weapons": 9,
   "/weapons/{id}": 9,
   "POST /weapons": 9,
@@ -144,8 +168,9 @@ Student Name
 ## הערות חשובות לבודק
 
 - הבדיקה משנה את `weapons.json` במהלך הריצה.
-- מומלץ להתחיל כל בדיקה מקובץ נתונים נקי וזהה לקובץ ההתחלתי.
+- הסקריפט מאפס את `weapons.json` אוטומטית מתוך `weapons.source.json` בתחילת כל ריצה.
 - אם השרת לא רץ על `localhost:8000`, הבדיקות ייכשלו.
 - אם התלמיד מחזיר שגיאות כ־`return {"error": "..."}` במקום `HTTPException`, בדרך כלל הסטטוס לא יהיה נכון ולכן הוא יאבד ניקוד.
 - אם השרת שומר נתונים רק בזיכרון ולא בקובץ, הוא יאבד נקודות בבדיקות השמירה לקובץ.
 - אם מריצים את הסקריפט מתיקייה אחרת, חובה להשתמש ב־`STUDENT_PROJECT_DIR`, אחרת הסריקה הסטטית והקריאה ל־`weapons.json` יהיו על התיקייה הלא נכונה.
+- אם `weapons.source.json` לא נמצא ליד `index.js`, יש להשתמש ב־`WEAPONS_SOURCE_FILE`.

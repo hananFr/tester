@@ -39,6 +39,9 @@ condition=
 
 const BASE_URL = 'http://localhost:8000';
 const PROJECT_DIR = process.env.STUDENT_PROJECT_DIR ? path.resolve(process.env.STUDENT_PROJECT_DIR) : __dirname;
+const SOURCE_WEAPONS_FILE = process.env.WEAPONS_SOURCE_FILE
+    ? path.resolve(process.env.WEAPONS_SOURCE_FILE)
+    : path.join(__dirname, 'weapons.source.json');
 const WEAPONS_FILE = path.join(PROJECT_DIR, 'weapons.json');
 const GRADES_FILE = path.join(__dirname, 'grades.json');
 const REQUIRED_FIELDS = ['type', 'model', 'ammo_type', 'condition'];
@@ -65,6 +68,15 @@ const codeRequirements = [
 
 function readWeaponsFile() {
     return JSON.parse(fs.readFileSync(WEAPONS_FILE, 'utf8'));
+}
+
+function resetWeaponsFile() {
+    if (!fs.existsSync(SOURCE_WEAPONS_FILE)) {
+        throw new Error(`Missing source data file: ${SOURCE_WEAPONS_FILE}`);
+    }
+
+    JSON.parse(fs.readFileSync(SOURCE_WEAPONS_FILE, 'utf8'));
+    fs.copyFileSync(SOURCE_WEAPONS_FILE, WEAPONS_FILE);
 }
 
 function readPythonFiles(dir = PROJECT_DIR) {
@@ -184,7 +196,9 @@ function createGradeSheet(studentName) {
             logger_usage: 0,
             http_exception_usage: 0
         },
-        project_dir: PROJECT_DIR
+        project_dir: PROJECT_DIR,
+        weapons_file: WEAPONS_FILE,
+        source_weapons_file: SOURCE_WEAPONS_FILE
     };
 
     endpoints.forEach((endpoint) => {
@@ -544,6 +558,7 @@ async function gradeDeleteByCondition(grades) {
 
 async function testFastApi() {
     const studentName = input('Student Name \n');
+    resetWeaponsFile();
     const grades = createGradeSheet(studentName);
 
     await gradeCodeRequirements(grades);
