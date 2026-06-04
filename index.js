@@ -255,12 +255,19 @@ async function gradeCodeRequirements(grades) {
 }
 
 async function gradeGetWeapons(grades) {
+    let validPassed = false;
+
     try {
         const fileWeapons = readWeaponsFile();
         const response = await http.get('/weapons');
 
         if (sameJson(response, fileWeapons)) {
             grades['/weapons'] += 5;
+            validPassed = true;
+        }
+
+        if (!validPassed) {
+            return;
         }
 
         const beforeLength = fileWeapons.length;
@@ -285,6 +292,8 @@ async function gradeGetWeapons(grades) {
 }
 
 async function gradeGetWeaponById(grades) {
+    let validPassed = false;
+
     try {
         const weapons = readWeaponsFile();
         const expected = weapons[0];
@@ -292,9 +301,14 @@ async function gradeGetWeaponById(grades) {
 
         if (sameJson(response, expected)) {
             grades['/weapons/{id}'] += 5;
+            validPassed = true;
         }
     } catch (error) {
         console.log('GET /weapons/{id} valid case failed:', error.message);
+    }
+
+    if (!validPassed) {
+        return;
     }
 
     try {
@@ -308,6 +322,7 @@ async function gradeGetWeaponById(grades) {
 }
 
 async function gradePostWeapon(grades) {
+    let validPassed = false;
     const weapon = {
         type: 'machine_gun',
         model: `POST-GRADE-MAG-${RUN_ID}`,
@@ -331,13 +346,18 @@ async function gradePostWeapon(grades) {
             REQUIRED_FIELDS.every((field) => created[field] === weapon[field])
         ) {
             grades['POST /weapons'] += 5;
+            validPassed = true;
         }
 
-        if (containsWeapon(readWeaponsFile(), created)) {
+        if (validPassed && containsWeapon(readWeaponsFile(), created)) {
             grades['POST /weapons'] += 1;
         }
     } catch (error) {
         console.log('POST /weapons valid case failed:', error.message);
+    }
+
+    if (!validPassed) {
+        return;
     }
 
     const badCases = [
@@ -367,6 +387,8 @@ async function gradePostWeapon(grades) {
 }
 
 async function gradePutWeapon(grades) {
+    let validPassed = false;
+
     try {
         const before = readWeaponsFile();
         const target = before.find((weapon) => weapon.condition !== 'critical') || before[0];
@@ -390,17 +412,22 @@ async function gradePutWeapon(grades) {
             updated.condition === update.condition
         ) {
             grades['PUT /weapons/{id}'] += 5;
+            validPassed = true;
         }
 
         const otherItemsUnchanged = before
             .filter((weapon) => weapon.id !== target.id)
             .every((weapon) => sameJson(weapon, after.find((item) => item.id === weapon.id)));
 
-        if (otherItemsUnchanged && sameJson(readWeaponsFile().find((weapon) => weapon.id === target.id), updated)) {
+        if (validPassed && otherItemsUnchanged && sameJson(readWeaponsFile().find((weapon) => weapon.id === target.id), updated)) {
             grades['PUT /weapons/{id}'] += 2;
         }
     } catch (error) {
         console.log('PUT /weapons/{id} valid case failed:', error.message);
+    }
+
+    if (!validPassed) {
+        return;
     }
 
     try {
@@ -419,6 +446,7 @@ async function gradePutWeapon(grades) {
 
 async function gradeDeleteWeapon(grades) {
     let deletedId;
+    let validPassed = false;
 
     try {
         const before = readWeaponsFile();
@@ -429,17 +457,22 @@ async function gradeDeleteWeapon(grades) {
 
         if (after.length === before.length - 1 && !after.some((weapon) => weapon.id === target.id)) {
             grades['DELETE /weapons/{id}'] += 5;
+            validPassed = true;
         }
 
         const onlyTargetDeleted = before
             .filter((weapon) => weapon.id !== target.id)
             .every((weapon) => sameJson(weapon, after.find((item) => item.id === weapon.id)));
 
-        if (onlyTargetDeleted && !readWeaponsFile().some((weapon) => weapon.id === target.id)) {
+        if (validPassed && onlyTargetDeleted && !readWeaponsFile().some((weapon) => weapon.id === target.id)) {
             grades['DELETE /weapons/{id}'] += 2;
         }
     } catch (error) {
         console.log('DELETE /weapons/{id} valid case failed:', error.message);
+    }
+
+    if (!validPassed) {
+        return;
     }
 
     try {
@@ -452,6 +485,8 @@ async function gradeDeleteWeapon(grades) {
 }
 
 async function gradeByCondition(grades) {
+    let validPassed = false;
+
     try {
         const weapons = readWeaponsFile();
         const condition = 'damaged';
@@ -460,13 +495,18 @@ async function gradeByCondition(grades) {
 
         if (sameJson(response, expected)) {
             grades['/weapons/by-condition'] += 5;
+            validPassed = true;
         }
 
-        if (response.every((weapon) => weapon.condition === condition)) {
+        if (validPassed && response.every((weapon) => weapon.condition === condition)) {
             grades['/weapons/by-condition'] += 2;
         }
     } catch (error) {
         console.log('GET /weapons/by-condition valid case failed:', error.message);
+    }
+
+    if (!validPassed) {
+        return;
     }
 
     try {
@@ -482,6 +522,8 @@ async function gradeByCondition(grades) {
 }
 
 async function gradeCombatReady(grades) {
+    let validPassed = false;
+
     try {
         const weapons = readWeaponsFile();
         const type = 'machine_gun';
@@ -490,13 +532,14 @@ async function gradeCombatReady(grades) {
 
         if (sameJson(response, expected)) {
             grades['/weapons/combat-ready'] += 5;
+            validPassed = true;
         }
 
-        if (response.every((weapon) => weapon.type === type)) {
+        if (validPassed && response.every((weapon) => weapon.type === type)) {
             grades['/weapons/combat-ready'] += 2;
         }
 
-        if (response.every((weapon) => ['new', 'good'].includes(weapon.condition))) {
+        if (validPassed && response.every((weapon) => ['new', 'good'].includes(weapon.condition))) {
             grades['/weapons/combat-ready'] += 2;
         }
     } catch (error) {
@@ -505,12 +548,19 @@ async function gradeCombatReady(grades) {
 }
 
 async function gradeSummaryByType(grades) {
+    let validPassed = false;
+
     try {
         const expected = countByType(readWeaponsFile());
         const response = await http.get('/weapons/summary/by-type');
 
         if (sameJson(response, expected)) {
             grades['/weapons/summary/by-type'] += 5;
+            validPassed = true;
+        }
+
+        if (!validPassed) {
+            return;
         }
 
         const dynamicType = `summary_dynamic_type_${RUN_ID}`;
@@ -535,6 +585,7 @@ async function gradeSummaryByType(grades) {
 
 async function gradeDeleteByCondition(grades) {
     const condition = 'critical';
+    let validPassed = false;
 
     try {
         const before = readWeaponsFile();
@@ -546,9 +597,10 @@ async function gradeDeleteByCondition(grades) {
 
         if (expectedDeletedCount > 0 && sameJson(after, expectedRemaining)) {
             grades['DELETE /weapons/by-condition'] += 5;
+            validPassed = true;
         }
 
-        if (!after.some((weapon) => weapon.condition === condition) && sameJson(readWeaponsFile(), expectedRemaining)) {
+        if (validPassed && !after.some((weapon) => weapon.condition === condition) && sameJson(readWeaponsFile(), expectedRemaining)) {
             grades['DELETE /weapons/by-condition'] += 3;
         }
     } catch (error) {
