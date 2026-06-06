@@ -69,6 +69,45 @@ STUDENT_PROJECT_DIR=/path/to/student/project SERVER_LOG_FILE=/path/to/student/pr
 
 חשוב: שרת התלמיד חייב להשתמש באותו `weapons.json` שהסקריפט קורא ממנו. לכן הכי פשוט ובטוח להריץ את הסקריפט מתוך תיקיית הפרויקט של התלמיד.
 
+## הרצה ב־Windows
+
+הסקריפט עצמו מתאים גם ל־Windows, כל עוד מותקן Node.js בגרסה 18 ומעלה. הקוד משתמש ב־`path.join` ו־`path.resolve`, ולכן נתיבים של Windows כמו `C:\Users\...\project` אמורים לעבוד.
+
+ההבדל העיקרי הוא צורת הגדרת משתני הסביבה. במקום:
+
+```bash
+STUDENT_PROJECT_DIR=/path/to/student/project node index.js
+```
+
+ב־PowerShell משתמשים כך:
+
+```powershell
+$env:STUDENT_PROJECT_DIR="C:\path\to\student\project"
+node index.js
+```
+
+אפשר להוסיף גם קובץ מקור וקובץ לוג:
+
+```powershell
+$env:STUDENT_PROJECT_DIR="C:\path\to\student\project"
+$env:WEAPONS_SOURCE_FILE="C:\path\to\weapons.source.json"
+$env:SERVER_LOG_FILE="C:\path\to\student\project\server.log"
+node index.js
+```
+
+ב־cmd משתמשים כך:
+
+```cmd
+set STUDENT_PROJECT_DIR=C:\path\to\student\project
+node index.js
+```
+
+הפניית לוגים ב־Windows עובדת גם כן:
+
+```cmd
+uvicorn main:app --reload > server.log 2>&1
+```
+
 ## איפוס נתונים
 
 הבדיקות משנות את `weapons.json`: הן מוסיפות, מעדכנות ומוחקות פריטים.  
