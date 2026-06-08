@@ -41,7 +41,9 @@ const PROJECT_DIR = process.env.STUDENT_PROJECT_DIR ? path.resolve(process.env.S
 const SOURCE_WEAPONS_FILE = process.env.WEAPONS_SOURCE_FILE
     ? path.resolve(process.env.WEAPONS_SOURCE_FILE)
     : path.join(__dirname, 'weapons.source.json');
-const WEAPONS_FILE = path.join(PROJECT_DIR, 'weapons.json');
+const WEAPONS_FILE = process.env.STUDENT_WEAPONS_FILE
+    ? path.resolve(process.env.STUDENT_WEAPONS_FILE)
+    : path.join(PROJECT_DIR, 'weapons.json');
 const GRADES_FILE = path.join(__dirname, 'grades.json');
 const GRADES_DIR = path.join(__dirname, 'grades');
 const SERVER_LOG_FILE = process.env.SERVER_LOG_FILE ? path.resolve(process.env.SERVER_LOG_FILE) : null;
@@ -70,6 +72,10 @@ const LOG_METHODS = 'debug|info|warning|warn|error|exception|critical';
 
 function readWeaponsFile() {
     return JSON.parse(fs.readFileSync(WEAPONS_FILE, 'utf8'));
+}
+
+function writeWeaponsFile(weapons) {
+    fs.writeFileSync(WEAPONS_FILE, JSON.stringify(weapons, null, 4));
 }
 
 function resetWeaponsFile() {
@@ -126,12 +132,27 @@ function resolveLocalModulePath(moduleName, fromFilePath) {
 
 function findLocalImports(file) {
     const imports = [];
-    const fromImportRegex = /^\s*from\s+([a-zA-Z_][\w.]*)\s+import\s+/gm;
+    const fromImportBlockRegex = /^\s*from\s+([a-zA-Z_][\w.]*)\s+import\s+\(([\s\S]*?)\)/gm;
+    const fromImportRegex = /^\s*from\s+([a-zA-Z_][\w.]*)\s+import\s+(\*|[a-zA-Z_][\w.]*(?:\s*,\s*[a-zA-Z_][\w.]*)*)/gm;
     const importRegex = /^\s*import\s+([a-zA-Z_][\w.]*(?:\s*,\s*[a-zA-Z_][\w.]*)*)/gm;
     let match;
 
+    while ((match = fromImportBlockRegex.exec(file.content)) !== null) {
+        imports.push(match[1]);
+        for (const importedName of match[2].split(',').map((name) => name.trim().split(/\s+as\s+/)[0]).filter(Boolean)) {
+            if (importedName !== '*') {
+                imports.push(`${match[1]}.${importedName}`);
+            }
+        }
+    }
+
     while ((match = fromImportRegex.exec(file.content)) !== null) {
         imports.push(match[1]);
+        for (const importedName of match[2].split(',').map((name) => name.trim().split(/\s+as\s+/)[0])) {
+            if (importedName !== '*') {
+                imports.push(`${match[1]}.${importedName}`);
+            }
+        }
     }
 
     while ((match = importRegex.exec(file.content)) !== null) {
@@ -190,20 +211,20 @@ function input(prompt = '') {
     }
 
     const buffer = Buffer.alloc(1);
-    let result = '';
+    const bytes = [];
 
     while (true) {
         const bytesRead = fs.readSync(0, buffer, 0, 1, null);
         if (bytesRead === 0) break;
 
-        const char = buffer.toString();
+        const char = String.fromCharCode(buffer[0]);
         if (char === '\n') break;
         if (char !== '\r') {
-            result += char;
+            bytes.push(buffer[0]);
         }
     }
 
-    return result;
+    return Buffer.from(bytes).toString('utf8');
 }
 
 function writeGradesFile(result) {
@@ -373,8 +394,25 @@ function writeSummaryFile(summaryFile) {
     fs.writeFileSync(summaryFile, content);
 }
 
+function normalizeJson(value) {
+    if (Array.isArray(value)) {
+        return value.map(normalizeJson);
+    }
+
+    if (value && typeof value === 'object') {
+        return Object.keys(value)
+            .sort()
+            .reduce((normalized, key) => {
+                normalized[key] = normalizeJson(value[key]);
+                return normalized;
+            }, {});
+    }
+
+    return value;
+}
+
 function sameJson(actual, expected) {
-    return JSON.stringify(actual) === JSON.stringify(expected);
+    return JSON.stringify(normalizeJson(actual)) === JSON.stringify(normalizeJson(expected));
 }
 
 function maxId(weapons) {
@@ -769,12 +807,20 @@ async function gradePostWeapon(grades) {
     };
 
     try {
-        const before = await getApiWeaponsForExpectedData();
+        const originalWeapons = await getApiWeaponsForExpectedData();
+        const originalMaxId = maxId(originalWeapons);
+        const removedWeapon = originalWeapons.find((item) => Number(item.id) !== originalMaxId);
+        const before = removedWeapon
+            ? originalWeapons.filter((item) => item.id !== removedWeapon.id)
+            : originalWeapons;
         const expectedId = maxId(before) + 1;
-        resetWeaponsFile();
+        const lengthBasedId = before.length + 1;
+
+        writeWeaponsFile(before);
         const response = await http.post('/weapons', weapon);
         const fileAfter = readWeaponsFile();
         const createdInFile = fileAfter.find((item) => item.id === expectedId);
+        const createdWithSameModel = fileAfter.filter((item) => item.model === weapon.model);
         const requestSucceeded = response !== undefined;
         let validPostPassed = false;
 
@@ -788,8 +834,11 @@ async function gradePostWeapon(grades) {
             grades['POST /weapons'] += 5;
             validPostPassed = true;
         } else {
-            addFailure(grades, 'POST /weapons', 'valid POST creates weapon with server id', {method: 'POST', route: '/weapons', body: weapon}, 'Created weapon was not found in API data with expected id or expected fields', {
-                expected_id: expectedId
+            addFailure(grades, 'POST /weapons', 'valid POST creates weapon with server id', {method: 'POST', route: '/weapons', body: weapon}, 'Created weapon was not found in weapons.json with max(id) + 1 or expected fields', {
+                removed_id_to_create_gap: removedWeapon?.id ?? null,
+                expected_id: expectedId,
+                length_based_id: lengthBasedId,
+                created_with_same_model: createdWithSameModel
             });
         }
 
@@ -811,6 +860,7 @@ async function gradePostWeapon(grades) {
 
 async function gradePutWeapon(grades) {
     try {
+        resetWeaponsFile();
         const before = await getApiWeaponsForExpectedData();
         const target = before.find((weapon) => weapon.condition !== 'critical') || before[0];
         const candidates = [
